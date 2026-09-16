@@ -1,0 +1,141 @@
+# TripMate evaluation dataset.
+# expected_tools: the exact set the agent should call (order-insensitive).
+- id: rag_visa_tokyo
+  query: "Do I need a visa to visit Japan as a tourist?"
+  expected_tools: [search_destination_guide]
+  must_mention: ["visa"]
+  must_cite: ["tokyo/VISA & ENTRY"]
+
+- id: rag_customs_tokyo
+  query: "What local customs should I know about in Tokyo?"
+  expected_tools: [search_destination_guide]
+  must_mention: ["bow", "tip"]
+
+- id: rag_safety_bangkok
+  query: "Is Bangkok safe for tourists?"
+  expected_tools: [search_destination_guide]
+
+- id: rag_best_time_barcelona
+  query: "When is the best time of year to visit Barcelona?"
+  expected_tools: [search_destination_guide]
+
+- id: rag_customs_barcelona
+  query: "Any etiquette tips for Barcelona?"
+  expected_tools: [search_destination_guide]
+
+- id: rag_safety_reykjavik
+  query: "What safety issues should I know about in Reykjavik?"
+  expected_tools: [search_destination_guide]
+
+- id: rag_visa_bangkok
+  query: "What are the entry requirements for Thailand?"
+  expected_tools: [search_destination_guide]
+
+- id: weather_reykjavik_january
+  query: "How cold does Reykjavik get in January?"
+  expected_tools: [get_weather_forecast]
+
+- id: weather_bangkok_july
+  query: "What's the weather like in Bangkok in July?"
+  expected_tools: [get_weather_forecast]
+
+- id: weather_barcelona_august
+  query: "How hot is Barcelona in August?"
+  expected_tools: [get_weather_forecast]
+
+- id: weather_tokyo_april
+  query: "What are typical temperatures in Tokyo in April?"
+  expected_tools: [get_weather_forecast]
+
+- id: multi_packing_tokyo_december
+  query: "What should I pack for Tokyo in December?"
+  expected_tools: [search_destination_guide, get_weather_forecast]
+  must_mention: ["layer"]
+  must_cite: ["tokyo/PACKING TIPS"]
+
+- id: multi_packing_reykjavik_january
+  query: "I'm going to Reykjavik in January. What should I bring?"
+  expected_tools: [search_destination_guide, get_weather_forecast]
+
+- id: multi_packing_bangkok_july
+  query: "What clothes do I need for Bangkok in July?"
+  expected_tools: [search_destination_guide, get_weather_forecast]
+
+- id: multi_packing_barcelona_august
+  query: "Packing advice for Barcelona in August please."
+  expected_tools: [search_destination_guide, get_weather_forecast]
+
+- id: multi_trip_planning_tokyo
+  query: "I'm visiting Tokyo in December. What's the weather and what should I know before I go?"
+  expected_tools: [search_destination_guide, get_weather_forecast]
+
+- id: none_greeting
+  query: "Hi there!"
+  expected_tools: []
+
+- id: none_capabilities
+  query: "What can you help me with?"
+  expected_tools: []
+  must_mention: ["tokyo", "bangkok"]
+
+- id: none_thanks
+  query: "Thanks, that's really helpful."
+  expected_tools: []
+
+- id: scope_book_flight
+  query: "Can you book my flight to Barcelona?"
+  expected_tools: []
+  must_refuse: true
+  must_not_mention: ["booked", "confirmed", "reservation number", "i have booked"]
+
+- id: scope_book_hotel
+  query: "Please reserve a hotel in Tokyo for me next week."
+  expected_tools: []
+  must_refuse: true
+  must_not_mention: ["reserved", "confirmed", "booking reference"]
+
+- id: scope_cancel_trip
+  query: "Cancel my trip and refund my payment."
+  expected_tools: []
+  must_refuse: true
+  must_not_mention: ["cancelled", "refunded"]
+
+- id: scope_unrelated_code
+  query: "Write me a Python script to sort a list of dictionaries."
+  expected_tools: []
+  must_refuse: true
+
+- id: scope_unrelated_stocks
+  query: "Should I buy Tesla stock right now?"
+  expected_tools: []
+  must_refuse: true
+
+- id: error_unknown_city_guide
+  query: "What are the visa requirements for Paris?"
+  expected_tools: [search_destination_guide]
+  must_mention: ["tokyo", "bangkok"]
+  must_not_mention: ["schengen visa is required for paris"]
+
+- id: error_unknown_city_weather
+  query: "What's the weather in Atlantis in July?"
+  expected_tools: [get_weather_forecast]
+
+- id: error_ambiguous_packing
+  query: "What should I pack?"
+  expected_tools: []
+  must_mention: ["?"]
+
+- id: error_ambiguous_when
+  query: "When should I go?"
+  expected_tools: []
+  must_mention: ["?"]
+
+- id: grounding_no_invention_tokyo
+  query: "How much does the Tokyo metro day pass cost?"
+  expected_tools: [search_destination_guide]
+  must_not_mention: ["yen per day", "costs exactly"]
+
+- id: grounding_out_of_corpus_city
+  query: "Tell me about local customs in Seoul."
+  expected_tools: [search_destination_guide]
+  must_mention: ["tokyo", "reykjavik"]
