@@ -1,135 +1,87 @@
 """Tests for the FastAPI adapter."""
 
+import pytest
 from fastapi.testclient import TestClient
-from pydantic import BaseModel
 
 from tripmate.adapters.api import create_app
-from tripmate.config import Settings
-from tests.fakes import FakeLLMClient
-from tripmate.models import LLMResponse
 from tripmate.core.agent import Agent
-from tripmate.tools.registry import ToolRegistry
+from tripmate.models import LLMResponse, ToolCall
+from tripmate.tools.registry import ToolRegistry, tool
+from tripmate.models import ToolResult
+from typing import Annotated
+
+from tests.fakes import FakeLLMClient
 
 
-class ChatRequest(BaseModel):
-    query: str
-    session_id: str | None = None
+@tool
+def stub_guide(query: Annotated[str, "topic"]) -> ToolResult:
+    """Search the guide."""
+    return ToolResult.ok("stub_guide", {"chunks": [
+        {"ref": "tokyo/VISA & ENTRY", "city": "tokyo", "section": "VISA & ENTRY",
+         "text": "Visa-free for many nationalities.", "score": 0.9}
+    ]})
 
 
-def test_health_ok(tmp_path, monkeypatch):
-    """GET /health returns 200 with status and model info."""
-    monkeypatch.setenv("LLM_API_KEY", "test-key")
-    settings = Settings(
-        llm_api_key="test-key",
-        chroma_path=str(tmp_path / "chroma"),
-        database_url=f"sqlite:///{tmp_path}/health.db",
-        trace_dir=str(tmp_path / "traces"),
-        semantic_cache_enabled=False,
-    )
-
+def _client(script) -> TestClient:
     registry = ToolRegistry()
-    fake = FakeLLMClient([])
-    agent = Agent(llm=fake, registry=registry, settings=settings)
+    registry.register(stub_guide)
+    agent = Agent(llm=FakeLLMClient(script), registry=registry)
+    return TestClient(create_app(agent=agent))
 
-    app = create_app(agent=agent)
-    client = TestClient(app)
 
-    response = client.get("/health")
+def test_health_reports_ok():
+    response = _client([]).get("/health")
     assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "ok"
-    assert "model" in data
+    assert response.json()["status"] == "ok"
 
 
-def test_chat_empty_query_rejected(tmp_path, monkeypatch):
-    """POST /chat with empty query returns 422."""
-    monkeypatch.setenv("LLM_API_KEY", "test-key")
-    settings = Settings(
-        llm_api_key="test-key",
-        chroma_path=str(tmp_path / "chroma"),
-        database_url=f"sqlite:///{tmp_path}/chat.db",
-        trace_dir=str(tmp_path / "traces"),
-        semantic_cache_enabled=False,
-    )
-
-    registry = ToolRegistry()
-    fake = FakeLLMClient([])
-    agent = Agent(llm=fake, registry=registry, settings=settings)
-
-    app = create_app(agent=agent)
-    client = TestClient(app)
-
-    response = client.post("/chat", json={"query": ""})
-    assert response.status_code == 422
+def test_health_reports_the_registered_tools():
+    body = _client([]).get("/health").json()
+    assert body["tools"] == ["stub_guide"]
 
 
-def test_chat_success(tmp_path, monkeypatch):
-    """POST /chat with valid query returns 200 with agent response."""
-    monkeypatch.setenv("LLM_API_KEY", "test-key")
-    settings = Settings(
-        llm_api_key="test-key",
-        chroma_path=str(tmp_path / "chroma"),
-        database_url=f"sqlite:///{tmp_path}/chat2.db",
-        trace_dir=str(tmp_path / "traces"),
-        semantic_cache_enabled=False,
-    )
+def test_chat_returns_the_answer():
+    client = _client([LLMResponse(content="Hello from TripMate.")])
+    body = client.post("/chat", json={"query": "hello"}).json()
 
-    registry = ToolRegistry()
-    script = [LLMResponse(content="Hello there!")]
-    fake = FakeLLMClient(script)
-    agent = Agent(llm=fake, registry=registry, settings=settings)
-
-    app = create_app(agent=agent)
-    client = TestClient(app)
-
-    response = client.post("/chat", json={"query": "Hello"})
-    assert response.status_code == 200
-    data = response.json()
-    assert data["answer"] == "Hello there!"
-    assert "session_id" in data
+    assert body["answer"] == "Hello from TripMate."
 
 
-def test_sessions_no_store_returns_404(tmp_path, monkeypatch):
-    """/sessions/{id} returns 404 when no store configured."""
-    monkeypatch.setenv("LLM_API_KEY", "test-key")
-    settings = Settings(
-        llm_api_key="test-key",
-        chroma_path=str(tmp_path / "chroma"),
-        database_url=f"sqlite:///{tmp_path}/session.db",
-        trace_dir=str(tmp_path / "traces"),
-        semantic_cache_enabled=False,
-    )
+def test_chat_returns_citations_and_trace():
+    client = _client([
+        LLMResponse(tool_calls=[ToolCall(id="1", name="stub_guide",
+                                         arguments={"query": "visa"})]),
+        LLMResponse(content="Visa-free [tokyo/VISA & ENTRY]."),
+    ])
+    body = client.post("/chat", json={"query": "visa for Japan?"}).json()
 
-    registry = ToolRegistry()
-    fake = FakeLLMClient([])
-    agent = Agent(llm=fake, registry=registry, settings=settings)
-
-    app = create_app(agent=agent, store=None)
-    client = TestClient(app)
-
-    response = client.get("/sessions/abc123")
-    assert response.status_code == 404
+    assert body["citations"] == ["tokyo/VISA & ENTRY"]
+    assert len(body["trace"]) > 0
 
 
-def test_health_no_store_ok(tmp_path, monkeypatch):
-    """GET /health returns 200 even when vector store is unavailable."""
-    monkeypatch.setenv("LLM_API_KEY", "test-key")
-    settings = Settings(
-        llm_api_key="test-key",
-        chroma_path=str(tmp_path / "missing_chroma"),
-        database_url=f"sqlite:///{tmp_path}/health_no_store.db",
-        trace_dir=str(tmp_path / "traces"),
-        semantic_cache_enabled=False,
-    )
+def test_chat_echoes_the_session_id():
+    client = _client([LLMResponse(content="hi")])
+    body = client.post("/chat", json={"query": "hi", "session_id": "abc123"}).json()
 
-    registry = ToolRegistry()
-    fake = FakeLLMClient([])
-    agent = Agent(llm=fake, registry=registry, settings=settings)
+    assert body["session_id"] == "abc123"
 
-    app = create_app(agent=agent, store=None)
-    client = TestClient(app)
 
-    response = client.get("/health")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "ok"
+def test_chat_reports_cost_and_latency():
+    client = _client([LLMResponse(content="hi", prompt_tokens=10,
+                                  completion_tokens=2, cost_usd=0.0001)])
+    body = client.post("/chat", json={"query": "hi"}).json()
+
+    assert body["prompt_tokens"] == 10
+    assert body["latency_ms"] >= 0
+
+
+def test_missing_query_field_is_rejected_with_422():
+    assert _client([]).post("/chat", json={}).status_code == 422
+
+
+def test_empty_query_string_is_rejected_with_422():
+    assert _client([]).post("/chat", json={"query": ""}).status_code == 422
+
+
+def test_sessions_endpoint_returns_404_without_a_store():
+    assert _client([]).get("/sessions/nope").status_code == 404

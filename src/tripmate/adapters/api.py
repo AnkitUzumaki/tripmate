@@ -23,6 +23,18 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
 
 
+class ChatResponse(BaseModel):
+    answer: str
+    citations: list[str]
+    trace: list[dict[str, Any]]
+    prompt_tokens: int
+    completion_tokens: int
+    cost_usd: float
+    latency_ms: float
+    session_id: str
+    was_cached: bool
+
+
 class HealthResponse(BaseModel):
     status: str
     model: str | None = None
@@ -70,12 +82,22 @@ def create_app(
 
         return HealthResponse(status="ok", model=model, tools=tools, chunk_count=chunk_count)
 
-    @app.post("/chat", response_model=dict[str, Any])
-    def chat(request: ChatRequest) -> dict[str, Any]:
+    @app.post("/chat", response_model=ChatResponse)
+    def chat(request: ChatRequest) -> ChatResponse:
         """Accept a user query and return the agent's response."""
         active = _ensure_agent()
-        response = active.chat(request.query, session_id=request.session_id)
-        return response.model_dump()
+        result = active.chat(request.query, session_id=request.session_id)
+        return ChatResponse(
+            answer=result.answer,
+            citations=[c.ref for c in result.citations],
+            trace=[event.model_dump() for event in result.trace],
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=result.completion_tokens,
+            cost_usd=result.cost_usd,
+            latency_ms=result.latency_ms,
+            session_id=result.session_id,
+            was_cached=result.was_cached,
+        )
 
     @app.get("/sessions/{session_id}", response_model=SessionHistoryResponse)
     def get_session(session_id: str) -> SessionHistoryResponse:
