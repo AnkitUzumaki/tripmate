@@ -61,3 +61,18 @@ def test_tool_carries_a_derived_schema():
 def test_city_is_optional_in_the_schema():
     schema = search_destination_guide._tool_spec.schema
     assert "city" not in schema["function"]["parameters"].get("required", [])
+
+
+def test_concurrent_first_access_builds_only_one_store():
+    from concurrent.futures import ThreadPoolExecutor
+
+    from tripmate.tools import destination
+
+    original = destination._store
+    destination._store = None
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            stores = list(pool.map(lambda _: destination._get_store(), range(8)))
+        assert len({id(s) for s in stores}) == 1
+    finally:
+        destination._store = original

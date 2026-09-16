@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Annotated
 
 from tripmate.config import get_settings
@@ -13,6 +14,7 @@ SUPPORTED_CITIES: tuple[str, ...] = ("tokyo", "reykjavik", "bangkok", "barcelona
 TOOL_NAME = "search_destination_guide"
 
 _store: VectorStore | None = None
+_store_lock = threading.Lock()
 
 
 def set_store(store: VectorStore) -> None:
@@ -29,7 +31,9 @@ def reset_store() -> None:
 def _get_store() -> VectorStore:
     global _store
     if _store is None:
-        _store = build_store()
+        with _store_lock:
+            if _store is None:
+                _store = build_store()
     return _store
 
 
