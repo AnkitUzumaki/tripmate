@@ -102,6 +102,11 @@ class ToolRegistry:
         if spec is None:
             return ToolResult.error(name, f"unknown tool {name!r}")
 
+        if not isinstance(raw_args, dict):
+            return ToolResult.error(
+                name, f"invalid arguments: expected an object, got {type(raw_args).__name__}"
+            )
+
         try:
             args = spec.arg_model(**raw_args)
         except ValidationError as exc:

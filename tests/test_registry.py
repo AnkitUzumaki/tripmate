@@ -1,5 +1,7 @@
 from typing import Annotated
 
+import pytest
+
 from tripmate.models import ToolResult
 from tripmate.tools.registry import ToolRegistry, tool
 
@@ -81,3 +83,35 @@ def test_dispatch_converts_tool_exceptions_into_error_results():
 
 def test_names_lists_every_registered_tool():
     assert _registry().names() == ["sample_add", "sample_boom"]
+
+
+def test_dispatch_returns_error_result_for_non_mapping_arguments():
+    registry = _registry()
+
+    for bad_args in ([1, 2], "a string", None, 42):
+        result = registry.dispatch("sample_add", bad_args)
+        assert result.status == "error"
+        assert "expected an object" in result.reason
+
+
+def test_register_rejects_a_function_without_the_tool_decorator():
+    def undecorated(x: int) -> ToolResult:
+        """Not a tool."""
+        return ToolResult.ok("undecorated", {})
+
+    with pytest.raises(ValueError, match="not decorated"):
+        ToolRegistry().register(undecorated)
+
+
+def test_schema_handles_a_bare_type_hint_without_annotated():
+    @tool
+    def bare_hint_tool(city: str) -> ToolResult:
+        """Takes a bare hint."""
+        return ToolResult.ok("bare_hint_tool", {})
+
+    registry = ToolRegistry()
+    registry.register(bare_hint_tool)
+    params = registry.schemas()[0]["function"]["parameters"]
+
+    assert params["properties"]["city"]["type"] == "string"
+    assert params["properties"]["city"].get("description", "") == ""
