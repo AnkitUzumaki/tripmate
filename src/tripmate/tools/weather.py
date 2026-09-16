@@ -4,6 +4,9 @@ A forecast API reaches about 16 days. "What should I pack for Tokyo in December?
 is not a forecast question — it is a climate-normal question, answered from
 historical reanalysis averaged over the last N years. The `source` field on every
 response states which path produced it, so the agent never misrepresents what it knows.
+
+HTTP transport (geocoding, forecast/archive fetches, daily-record averaging) lives in
+`tripmate.tools.openmeteo`; this module owns routing, caching and the mock fallback.
 """
 
 from __future__ import annotations
@@ -11,7 +14,6 @@ from __future__ import annotations
 import calendar
 from dataclasses import dataclass
 from datetime import date, datetime
-from statistics import mean
 from typing import Annotated, Literal
 
 import diskcache
@@ -19,17 +21,18 @@ import httpx
 
 from tripmate.config import get_settings
 from tripmate.models import ToolResult, WeatherReport
+from tripmate.tools.openmeteo import (
+    ARCHIVE_URL,
+    FORECAST_URL,
+    GEOCODE_URL,
+    fetch_archive,
+    fetch_forecast,
+    geocode,
+    summarise,
+)
 from tripmate.tools.registry import tool
 
-GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
-FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
-ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
-
 FORECAST_HORIZON_DAYS = 16
-ARCHIVE_LAG_DAYS = 7
-DAILY_FIELDS = "temperature_2m_max,temperature_2m_min,precipitation_sum"
-RAINY_DAY_MM = 1.0
-FORECAST_TTL_S = 3600
 
 COLD_MAX_C = 10.0
 HOT_MIN_C = 28.0
@@ -161,67 +164,6 @@ def describe(temp_min: float, temp_max: float, precip_days: int,
     return f"{temperature}, {precipitation}"
 
 
-def _geocode(city: str, timeout: float) -> tuple[float, float, str] | None:
-    response = httpx.get(
-        GEOCODE_URL, params={"name": city, "count": 1}, timeout=timeout
-    )
-    response.raise_for_status()
-    results = response.json().get("results") or []
-    if not results:
-        return None
-    first = results[0]
-    return float(first["latitude"]), float(first["longitude"]), str(first["name"])
-
-
-def _summarise(daily: dict, month: int | None) -> tuple[float, float, int, int]:
-    """Average max/min temperature and count rainy days, optionally for one month."""
-    times = daily["time"]
-    maxes, mins, precip = [], [], []
-    for index, stamp in enumerate(times):
-        if month is not None and int(stamp.split("-")[1]) != month:
-            continue
-        maxes.append(daily["temperature_2m_max"][index])
-        mins.append(daily["temperature_2m_min"][index])
-        precip.append(daily["precipitation_sum"][index] or 0.0)
-
-    if not maxes:
-        raise ValueError("no daily records for the requested period")
-
-    rainy = sum(1 for value in precip if value >= RAINY_DAY_MM)
-    days = len(maxes)
-    return mean(mins), mean(maxes), rainy, days
-
-
-def _fetch_forecast(lat: float, lon: float, day: date, timeout: float) -> dict:
-    response = httpx.get(
-        FORECAST_URL,
-        params={
-            "latitude": lat, "longitude": lon, "daily": DAILY_FIELDS,
-            "start_date": day.isoformat(), "end_date": day.isoformat(),
-            "timezone": "auto",
-        },
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    return response.json()["daily"]
-
-
-def _fetch_archive(lat: float, lon: float, years: int, timeout: float) -> dict:
-    end = date.today().replace(day=1)
-    start = end.replace(year=end.year - years)
-    response = httpx.get(
-        ARCHIVE_URL,
-        params={
-            "latitude": lat, "longitude": lon, "daily": DAILY_FIELDS,
-            "start_date": start.isoformat(), "end_date": end.isoformat(),
-            "timezone": "auto",
-        },
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    return response.json()["daily"]
-
-
 def _mock_report(city: str, period: Period) -> WeatherReport | None:
     seasons = MOCK_CLIMATE.get(city.strip().lower())
     if seasons is None:
@@ -256,7 +198,7 @@ def get_weather_forecast(
         return ToolResult.ok(TOOL_NAME, cached)
 
     try:
-        located = _geocode(city, settings.weather_timeout_s)
+        located = geocode(city, settings.weather_timeout_s)
         if located is None:
             return ToolResult.no_data(
                 TOOL_NAME, f"could not find a city named {city!r}"
@@ -264,16 +206,16 @@ def get_weather_forecast(
         latitude, longitude, resolved_name = located
 
         if period.kind == "date" and period.day is not None:
-            daily = _fetch_forecast(latitude, longitude, period.day,
+            daily = fetch_forecast(latitude, longitude, period.day,
                                     settings.weather_timeout_s)
-            low, high, rainy, days = _summarise(daily, month=None)
+            low, high, rainy, days = summarise(daily, month=None)
             source = "forecast"
             precip_days = rainy
         else:
-            daily = _fetch_archive(latitude, longitude,
+            daily = fetch_archive(latitude, longitude,
                                    settings.weather_climate_years,
                                    settings.weather_timeout_s)
-            low, high, rainy, days = _summarise(daily, month=period.month)
+            low, high, rainy, days = summarise(daily, month=period.month)
             source = "climate_normal"
             precip_days = round(rainy * 30 / days) if days else 0
 
@@ -283,7 +225,7 @@ def get_weather_forecast(
             temp_range_c=[round(low, 1), round(high, 1)], precip_days=precip_days,
         )
 
-    except (httpx.HTTPError, KeyError, ValueError) as exc:
+    except (httpx.HTTPError, KeyError, ValueError, IndexError, TypeError) as exc:
         fallback = _mock_report(city, period)
         if fallback is None:
             return ToolResult.error(
@@ -298,5 +240,5 @@ def get_weather_forecast(
     if source == "climate_normal":
         _get_cache().set(cache_key, payload)  # normals never change
     else:
-        _get_cache().set(cache_key, payload, expire=FORECAST_TTL_S)
+        _get_cache().set(cache_key, payload, expire=settings.weather_forecast_ttl_s)
     return ToolResult.ok(TOOL_NAME, payload)

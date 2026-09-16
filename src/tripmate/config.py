@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     weather_timeout_s: float = Field(default=3.0, gt=0)
     weather_cache_dir: str = "./.weather_cache"
     weather_climate_years: int = Field(default=5, gt=0, le=20)
+    weather_forecast_ttl_s: int = Field(default=3600, gt=0)
 
     # --- Persistence ---
     database_url: str = "sqlite:///./tripmate.db"

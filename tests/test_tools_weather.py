@@ -4,6 +4,7 @@ import httpx
 import pytest
 import respx
 
+from tripmate.tools.openmeteo import summarise
 from tripmate.tools.weather import (
     ARCHIVE_URL,
     FORECAST_URL,
@@ -52,6 +53,12 @@ def test_resolve_period_rejects_unparseable_text():
         resolve_period("sometime soonish")
 
 
+def test_resolve_period_downgrades_a_past_date_to_its_month():
+    today = date(2026, 9, 16)
+    period = resolve_period("2020-01-15", today=today)
+    assert period.kind == "month"
+
+
 def test_describe_reports_cold_for_low_temperatures():
     assert "cold" in describe(-3.0, 2.0, 2)
 
@@ -66,6 +73,21 @@ def test_describe_mentions_rain_when_precipitation_days_are_high():
 
 def test_describe_does_not_call_a_single_rainy_day_frequent_rain():
     assert "frequent rain" not in describe(18.0, 24.0, 1, total_days=1)
+
+
+def test_summarise_skips_days_with_null_temperatures():
+    daily = {
+        "time": ["2021-12-01", "2021-12-02"],
+        "temperature_2m_max": [None, 12.0],
+        "temperature_2m_min": [None, 3.0],
+        "precipitation_sum": [0.0, 0.0],
+    }
+
+    low, high, rainy, days = summarise(daily, month=None)
+
+    assert days == 1
+    assert low == 3.0
+    assert high == 12.0
 
 
 @respx.mock
@@ -165,3 +187,27 @@ def test_repeated_month_query_is_served_from_cache():
     get_weather_forecast("Tokyo", "December")
 
     assert archive.call_count == 1
+
+
+@respx.mock
+def test_mock_fallback_result_is_never_cached():
+    respx.get(GEOCODE_URL).mock(side_effect=httpx.TimeoutException("timed out"))
+
+    offline = get_weather_forecast("Tokyo", "December")
+    assert offline.data["source"] == "mock_fallback"
+
+    respx.get(GEOCODE_URL).mock(return_value=httpx.Response(200, json=GEOCODE_OK))
+    respx.get(ARCHIVE_URL).mock(
+        return_value=httpx.Response(200, json={
+            "daily": {
+                "time": ["2021-12-01"],
+                "temperature_2m_max": [12.0],
+                "temperature_2m_min": [3.0],
+                "precipitation_sum": [0.0],
+            }
+        })
+    )
+
+    online = get_weather_forecast("Tokyo", "December")
+
+    assert online.data["source"] == "climate_normal"
