@@ -14,7 +14,7 @@ PROVIDER_ENV_VARS: dict[str, str] = {
     "groq": "GROQ_API_KEY",
     "gemini": "GEMINI_API_KEY",
     "mistral": "MISTRAL_API_KEY",
-    "together_ai": "TOGETHER_AI_API_KEY",
+    "together_ai": "TOGETHERAI_API_KEY",
 }
 
 KEYLESS_PROVIDERS: frozenset[str] = frozenset({"ollama", "ollama_chat"})

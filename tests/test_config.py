@@ -46,3 +46,13 @@ def test_export_provider_key_raises_on_unknown_provider():
 def test_query_char_limit_must_be_positive():
     with pytest.raises(ValueError):
         Settings(llm_api_key="k", max_query_chars=0)
+
+
+def test_export_provider_key_uses_the_env_var_litellm_actually_reads_for_together_ai(monkeypatch):
+    monkeypatch.delenv("TOGETHERAI_API_KEY", raising=False)
+    settings = Settings(llm_model="together_ai/mixtral", llm_api_key="secret")
+
+    settings.export_provider_key()
+
+    import os
+    assert os.environ["TOGETHERAI_API_KEY"] == "secret"
