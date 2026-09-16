@@ -1,10 +1,13 @@
 # tests/test_agent.py
+import json
+
 import pytest
 
 from tripmate.core.agent import (
     Agent, InvalidQuery, extract_citations, validate_citations, validate_query,
 )
 from tripmate.core.trace import EventType
+from tripmate.db import Database, SessionStore
 from tripmate.models import Citation, LLMResponse, ToolCall, ToolResult
 from tripmate.tools.registry import ToolRegistry, tool
 
@@ -210,3 +213,70 @@ def test_trace_records_tokens_and_cost_from_llm_calls():
 
     assert response.prompt_tokens == 100
     assert response.cost_usd == pytest.approx(0.001)
+
+
+# --- fix round 1: casing-independent citation stripping ---
+
+@pytest.mark.parametrize("citation_text", [
+    "[paris/PACKING TIPS]",
+    "[Paris/Packing Tips]",
+    "[paris/packing tips]",
+])
+def test_rejected_citations_are_stripped_regardless_of_casing(citation_text):
+    answer = f"Layers {citation_text}."
+    cleaned, kept, rejected = validate_citations(
+        answer, extract_citations(answer), {"tokyo/PACKING TIPS"}
+    )
+    assert rejected == ["paris/PACKING TIPS"]
+    assert kept == []
+    assert "[" not in cleaned
+
+
+# --- fix round 1: multi-turn history actually reaches the model ---
+
+def test_multi_turn_history_accumulates_and_reaches_the_model(tmp_path):
+    db = Database(url=f"sqlite:///{tmp_path}/agent.db")
+    db.create_all()
+    store = SessionStore(db)
+
+    first_turn_llm = FakeLLMClient([LLMResponse(content="Tokyo is great in spring.")])
+    agent = Agent(llm=first_turn_llm, registry=_registry(), store=store)
+    agent.chat("when should I visit Tokyo?", session_id="s1")
+
+    history = store.history("s1")
+    assert [m["role"] for m in history] == ["user", "assistant"]
+    assert history[0]["content"] == "when should I visit Tokyo?"
+    assert history[1]["content"] == "Tokyo is great in spring."
+
+    second_turn_llm = FakeLLMClient([LLMResponse(content="Pack layers.")])
+    agent = Agent(llm=second_turn_llm, registry=_registry(), store=store)
+    agent.chat("what should I pack?", session_id="s1")
+
+    first_call_messages = second_turn_llm.calls[0]["messages"]
+    assert any(
+        m.get("content") == "when should I visit Tokyo?" for m in first_call_messages
+    )
+
+
+# --- fix round 1: tool_call_id fidelity under concurrent dispatch ---
+
+def test_tool_call_ids_stay_matched_to_their_own_result_under_concurrency():
+    agent, fake = _agent([
+        LLMResponse(tool_calls=[
+            ToolCall(id="guide-1", name="fake_guide",
+                     arguments={"query": "packing", "city": "tokyo"}),
+            ToolCall(id="weather-2", name="fake_weather",
+                     arguments={"city": "Tokyo", "date_or_month": "December"}),
+        ]),
+        LLMResponse(content="Pack warm layers [tokyo/PACKING TIPS]."),
+    ])
+    agent.chat("what should I pack for Tokyo in December?")
+
+    follow_up_messages = fake.calls[1]["messages"]
+    tool_messages = [m for m in follow_up_messages if m["role"] == "tool"]
+    expected_id_by_tool = {"fake_guide": "guide-1", "fake_weather": "weather-2"}
+
+    assert len(tool_messages) == 2
+    for message in tool_messages:
+        content = json.loads(message["content"])
+        assert message["tool_call_id"] == expected_id_by_tool[content["tool_name"]]

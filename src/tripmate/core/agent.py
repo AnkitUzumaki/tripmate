@@ -7,6 +7,7 @@ results go back as tool messages, and the model synthesises a grounded answer.
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -68,21 +69,35 @@ def extract_citations(answer: str) -> list[Citation]:
 def validate_citations(
     answer: str, citations: list[Citation], allowed_refs: set[str]
 ) -> tuple[str, list[Citation], list[str]]:
-    """Strip any citation that does not correspond to a chunk actually retrieved."""
+    """Strip any citation that does not correspond to a chunk actually retrieved.
+
+    Matching is done on parsed refs via CITATION_RE, not literal text, so any casing
+    the model emits is handled identically. `citations` stays in the signature for
+    call-site compatibility, but refs are re-derived from `answer` during the
+    substitution pass so a mismatched casing can never slip through.
+    """
     kept: list[Citation] = []
     rejected: list[str] = []
-    cleaned = answer
+    kept_refs: set[str] = set()
+    rejected_refs: set[str] = set()
 
-    for citation in citations:
+    def _replace(match: re.Match[str]) -> str:
+        citation = Citation(
+            city=match.group(1).strip().lower(),
+            section=match.group(2).strip().upper(),
+        )
         if citation.ref in allowed_refs:
-            if citation.ref not in {c.ref for c in kept}:
+            if citation.ref not in kept_refs:
+                kept_refs.add(citation.ref)
                 kept.append(citation)
-            continue
-        rejected.append(citation.ref)
-        cleaned = cleaned.replace(f"[{citation.ref}]", "")
-        cleaned = cleaned.replace(f"[{citation.city}/{citation.section.title()}]", "")
+            return match.group(0)
+        if citation.ref not in rejected_refs:
+            rejected_refs.add(citation.ref)
+            rejected.append(citation.ref)
+        return ""
 
-    return cleaned.replace("  ", " ").strip(), kept, rejected
+    cleaned = CITATION_RE.sub(_replace, answer or "")
+    return " ".join(cleaned.split()), kept, rejected
 
 
 def _refs_from(result: ToolResult) -> set[str]:
@@ -125,15 +140,38 @@ class Agent:
         cached = self._cache.lookup(cleaned) if self._cache else None
         if cached is not None:
             tracer.record(EventType.CACHE_HIT, similarity=round(cached.similarity, 4))
-            return self._finish(cached.answer, cached.citations, tracer, session_id,
-                                started, was_cached=True)
+            response = self._finish(cached.answer, cached.citations, tracer, session_id,
+                                    started, was_cached=True)
+        else:
+            answer, citations = self._run_loop(cleaned, session_id, tracer)
 
-        answer, citations = self._run_loop(cleaned, session_id, tracer)
+            if self._cache:
+                self._cache.store(cleaned, answer, citations)
 
-        if self._cache:
-            self._cache.store(cleaned, answer, citations)
+            response = self._finish(answer, citations, tracer, session_id, started)
 
-        return self._finish(answer, citations, tracer, session_id, started)
+        self._persist_turns(session_id, cleaned, response, tracer)
+        return response
+
+    def _persist_turns(
+        self, session_id: str, query: str, response: AgentResponse, tracer: Tracer
+    ) -> None:
+        """Write the user/assistant turn pair so `_run_loop`'s history read on the
+        NEXT call actually sees this conversation. Never called on a query that
+        failed input validation (that never reached here) — a cache hit still
+        counts as a real turn, since the user did ask and the assistant did answer.
+        """
+        if not self._store:
+            return
+        self._store.add_turn(session_id, "user", query)
+        turn_id = self._store.add_turn(
+            session_id, "assistant", response.answer,
+            prompt_tokens=response.prompt_tokens,
+            completion_tokens=response.completion_tokens,
+            cost_usd=response.cost_usd,
+            latency_ms=response.latency_ms,
+        )
+        self._store.add_trace(turn_id, tracer.events)
 
     def _run_loop(
         self, query: str, session_id: str, tracer: Tracer
