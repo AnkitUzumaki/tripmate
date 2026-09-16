@@ -1,0 +1,10 @@
+.venv/
+.git/
+.chroma/
+.weather_cache/
+*.db
+traces/
+htmlcov/
+.pytest_cache/
+__pycache__/
+.env

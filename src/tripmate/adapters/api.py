@@ -120,3 +120,9 @@ def _ensure_agent() -> Agent:
     if _active_agent is None:
         _active_agent = build_agent()
     return _active_agent
+
+
+# Module-level ASGI app for `uvicorn tripmate.adapters.api:app` (Dockerfile CMD and
+# the README quickstart). Building it here is side-effect free: create_app() only
+# registers routes, the agent itself is constructed lazily on first request.
+app = create_app()

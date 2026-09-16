@@ -44,3 +44,7 @@ markers = [
 [tool.coverage.run]
 source = ["src/tripmate"]
 omit = ["*/adapters/cli.py"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
