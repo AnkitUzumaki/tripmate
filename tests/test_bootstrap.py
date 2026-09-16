@@ -16,7 +16,7 @@ def test_build_agent_registers_both_tools(tmp_path, monkeypatch):
 
     agent = build_agent(settings=settings)
 
-    assert set(agent._registry.names()) == {
+    assert set(agent.registry.names()) == {
         "search_destination_guide", "get_weather_forecast"
     }
 

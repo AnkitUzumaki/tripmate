@@ -123,6 +123,16 @@ class Agent:
         self._cache = cache
         self._tracer_factory = tracer_factory or (lambda sid: Tracer(session_id=sid))
 
+    @property
+    def registry(self) -> ToolRegistry:
+        """The tool registry this agent dispatches through."""
+        return self._registry
+
+    @property
+    def settings(self) -> Settings:
+        """The resolved settings this agent was constructed with."""
+        return self._settings
+
     def chat(self, query: str, session_id: str | None = None) -> AgentResponse:
         session_id = session_id or uuid.uuid4().hex[:12]
         tracer = self._tracer_factory(session_id)
