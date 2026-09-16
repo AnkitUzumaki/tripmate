@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.chroma/
+.weather_cache/
+*.db
+.coverage
+htmlcov/
+traces/*.jsonl
+!traces/example_*.jsonl
+.pytest_cache/
