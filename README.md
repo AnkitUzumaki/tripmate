@@ -6,6 +6,8 @@ is given tool schemas and picks. Every decision it makes is visible in a structu
 
 Built for the AI Agent Developer technical assessment.
 
+**▶ [Watch the demo (walkthrough + live agent runs)](https://youtu.be/XymVQe0yjCk)** — architecture, live single-tool / multi-tool / out-of-scope queries, the graceful-degradation path, code walkthrough, and the eval scorecard.
+
 ```mermaid
 flowchart LR
     U(["fa:fa-user Traveller"]) -->|"What should I pack<br/>for Tokyo in December?"| A
@@ -41,6 +43,7 @@ flowchart LR
 | **Tool selection accuracy** | 86.7% across 30 eval cases |
 | **Destinations** | Tokyo · Reykjavik · Bangkok · Barcelona |
 | **Interfaces** | CLI · REST API · Docker |
+| **Demo video** | [youtu.be/XymVQe0yjCk](https://youtu.be/XymVQe0yjCk) |
 
 ---
 
