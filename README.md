@@ -683,30 +683,46 @@ calls entirely, which would make tool selection unmeasurable.
 | Layer | Metric | Score |
 |---|---|---|
 | **Deterministic** | Tool-selection accuracy | **90.0%** |
-| | Citation validity | **96.7%** |
+| | Citation validity | **100%** |
 | | Refusal accuracy | **93.3%** |
-| | Overall pass rate | **80.0%** |
-| | p50 / p95 latency | 2497 / 7781 ms |
-| **RAGAS** | Faithfulness | **0.589** |
-| | Answer relevancy | **0.850** |
-| | Context precision (reference-free) | **0.878** |
+| | Overall pass rate | **83.3%** |
+| | p50 / p95 latency | 1984 / 6323 ms |
+| **RAGAS** | Faithfulness | **0.707** |
+| | Answer relevancy | **0.938** |
+| | Context precision (reference-free) | **0.949** |
 | **Simulation** | Goal completion | **100%** (3/3) |
 | | Context retention | **kept** (3/3) |
 
-**Reading the RAGAS numbers.** Answer relevancy (0.85) and context precision (0.88) are
-healthy: the agent retrieves the right chunks and answers the question asked.
-Faithfulness at **0.589** is the one to look at — it says roughly 40% of answer content
-is not directly traceable to a retrieved chunk. That is largely the model adding
-generic travel advice (power banks, travel adapters, first-aid kits) on top of the
-guide's content. It is not hallucinated *destination* fact — citation validity is 96.7%
-and the validator strips any citation not backed by a retrieval — but it is unsourced
-padding, and the honest read is that the prompt should push harder toward answering only
-from retrieved context. Faithfulness scored 0.748 on a 5-case subset and 0.589 across
-the full set, which is itself a reminder that small eval samples flatter.
+**The harness found a real weakness, and fixing it is measurable.** The first full run
+scored faithfulness at **0.589** — roughly 40% of answer content was not traceable to a
+retrieved chunk. Inspecting the answers showed why: the model was padding packing lists
+with generic advice from its own knowledge (power banks, travel adapters, first-aid
+kits, reusable water bottles) on top of the three tips the guide actually contained.
 
-These metrics are stochastic. Across runs, tool selection and refusal accuracy are
-stable; citation validity moves by a single case, which passes when re-run in isolation.
-Those are the numbers worth trusting.
+That is not invented *destination* fact — citation validity was already high and the
+validator strips any citation not backed by a retrieval — but it is unsourced filler
+presented alongside grounded content, which is exactly what faithfulness is for.
+
+The fix was three lines in the system prompt: every listed item must come from a tool
+result, no padding from own knowledge, and a short grounded answer beats a long
+half-invented one. Re-running the identical suite:
+
+| Metric | Before | After |
+|---|---|---|
+| Faithfulness | 0.589 | **0.707** |
+| Answer relevancy | 0.850 | **0.938** |
+| Context precision | 0.878 | **0.949** |
+| Citation validity | 96.7% | **100%** |
+| Overall pass rate | 80.0% | **83.3%** |
+| Tool-selection accuracy | 90.0% | 90.0% |
+
+A representative answer went from 1819 characters with ten items to 583 with three,
+each individually cited. Tool selection and refusal accuracy were unchanged, so the
+gain did not come at the cost of routing.
+
+This is the argument for the eval layer in one example: the defect was invisible to
+all 194 unit tests, which assert that tools are called and citations are valid — both
+of which were already true while the answers were 40% unsourced.
 
 **What the remaining failures are.** Four of the 30 cases fail tool selection, and all
 four are the same disagreement: for a destination outside the four covered cities
@@ -832,11 +848,11 @@ hierarchical routing: pick a tool *category* first, then a tool within it.
 - Evaluation dataset is ~30 queries, hand-authored — enough to catch regressions, not
   enough for statistical confidence. Faithfulness scored 0.748 on a 5-case subset and
   0.589 on the full set; small samples flatter.
-- **Faithfulness at 0.589** means roughly 40% of answer content is not traceable to a
-  retrieved chunk. It is generic travel advice rather than invented destination fact —
-  citation validity is 96.7% and unsupported citations are stripped — but the prompt
-  should push harder toward answering only from retrieved context. This is the clearest
-  measured weakness in the system.
+- **Faithfulness is 0.707**, up from 0.589 after tightening the grounding rules, but
+  still the weakest measured dimension: roughly 30% of answer content is not directly
+  traceable to a retrieved chunk. Prompt changes have taken this about as far as they
+  reasonably go; closing the remaining gap likely needs retrieval changes (more
+  sections per query, or a reranker) rather than more instruction.
 
 ## 12. Future improvements
 
