@@ -1,85 +1,397 @@
-# TripMate
+# TripMate — Agentic AI Travel Assistant
 
-An agentic AI travel assistant that answers natural-language questions about four
-destinations — Tokyo, Reykjavik, Bangkok, Barcelona — covering visa requirements,
-weather, packing advice, safety, and local customs. The agent decides which tools to
-call per query via LLM function-calling, not a keyword router or a fixed script, calls
-them in the right order (including both tools together for packing questions), and
-emits a visible, replayable reasoning trace for every turn.
+An LLM agent that answers travel questions about four destinations by **deciding for
+itself** which tools it needs per query. No keyword routing, no fixed script: the model
+is given tool schemas and picks. Every decision it makes is visible in a structured trace.
+
+Built for the AI Agent Developer technical assessment.
 
 ```mermaid
-flowchart TD
-    CLI[CLI adapter<br/>rich trace rendering] --> AG
-    API[FastAPI adapter<br/>POST /chat] --> AG
+flowchart LR
+    U(["fa:fa-user Traveller"]) -->|"What should I pack<br/>for Tokyo in December?"| A
 
-    AG[Agent core<br/>orchestration loop] --> VAL[Input validation]
-    AG --> SC[Semantic query cache]
-    AG --> LLM[LLM client<br/>LiteLLM]
-    AG --> REG[Tool registry<br/>schemas from type hints]
-    AG --> TR[Trace recorder<br/>structured events]
+    subgraph A["TripMate Agent"]
+        direction TB
+        L["Orchestration loop<br/><i>decides what it needs</i>"]
+    end
 
-    LLM -.-> P1[OpenAI]
-    LLM -.-> P2[Anthropic]
-    LLM -.-> P3[Groq]
-    LLM -.-> P4[Ollama local]
+    A -.->|reasons| D{"Which tools?"}
+    D -->|"guide knowledge"| T1["fa:fa-book search_destination_guide"]
+    D -->|"weather"| T2["fa:fa-cloud get_weather_forecast"]
+    D -->|"neither"| T3["answer directly<br/>or refuse"]
 
-    REG --> T1[search_destination_guide]
-    REG --> T2[get_weather_forecast]
+    T1 --> V[("ChromaDB<br/>20 chunks")]
+    T2 --> W{{"Open-Meteo"}}
 
-    T1 --> VS[VectorStore Protocol]
-    VS --> CH[(ChromaDB<br/>HNSW + metadata)]
-    EMB[fastembed<br/>bge-small-en-v1.5] --> CH
+    T1 & T2 --> S["Synthesise + cite"]
+    T3 --> S
+    S --> R(["Grounded answer<br/>+ reasoning trace"])
 
-    T2 --> OM{Open-Meteo}
-    OM --> GEO[Geocoding API]
-    OM --> FC[Forecast API<br/>date within 16 days]
-    OM --> AR[Archive/ERA5 API<br/>month -> climate normal]
-    T2 -.timeout/failure.-> MOCK[Mock lookup<br/>4 pack cities]
-    T2 --> DC[(diskcache)]
-
-    TR --> DB[(SQLAlchemy<br/>SQLite / Postgres)]
-    AG --> OUT[Answer + citations<br/>+ cost + latency]
+    style A fill:#1f2937,stroke:#3b82f6,stroke-width:2px,color:#fff
+    style D fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style R fill:#065f46,stroke:#10b981,color:#fff
+    style V fill:#78350f,stroke:#f59e0b,color:#fff
+    style W fill:#78350f,stroke:#f59e0b,color:#fff
 ```
+
+| | |
+|---|---|
+| **Tests** | 194 passing, 96% coverage |
+| **Model** | any provider via LiteLLM — verified on 3 |
+| **Tool selection accuracy** | 86.7% across 30 eval cases |
+| **Destinations** | Tokyo · Reykjavik · Bangkok · Barcelona |
+| **Interfaces** | CLI · REST API · Docker |
+
+---
+
+## Contents
+
+1. [What it does](#1-what-it-does)
+2. [Quickstart](#2-quickstart)
+3. [Architecture](#3-architecture)
+4. [Tool schemas as given to the LLM](#4-tool-schemas-as-given-to-the-llm)
+5. [Example runs](#5-example-runs)
+6. [Interfaces](#6-interfaces)
+7. [Design decisions](#7-design-decisions)
+8. [Evaluation](#8-evaluation)
+9. [Testing](#9-testing)
+10. [Scalability](#10-scalability)
+11. [Known limitations](#11-known-limitations)
+12. [Future improvements](#12-future-improvements)
+13. [Deliberately out of scope](#13-deliberately-out-of-scope)
+
+---
+
+## 1. What it does
+
+### Feature map
+
+```mermaid
+mindmap
+  root(("TripMate"))
+    Agent core
+      Dynamic tool selection
+      Parallel tool dispatch
+      Iteration ceiling
+      Multi-turn memory
+    Grounding
+      RAG over guide
+      City metadata filter
+      Citation validation
+      Refuses out of scope
+    Weather
+      Live forecast
+      Climate normals
+      Offline fallback
+    Observability
+      Structured trace
+      Replayable JSONL
+      Token + cost accounting
+    Evaluation
+      Deterministic scoring
+      RAGAS metrics
+      Simulated conversations
+    Interfaces
+      Rich CLI
+      FastAPI + OpenAPI
+      Multi-stage Docker
+```
+
+### Capability table
+
+| Capability | How it works | Where |
+|---|---|---|
+| **Dynamic tool selection** | Tool schemas derived from type hints, handed to the LLM; it chooses | `tools/registry.py` |
+| **RAG retrieval** | ChromaDB, cosine, city metadata pre-filter, score floor | `rag/store.py` |
+| **Weather** | Open-Meteo: forecast ≤16 days, else climate normal from 5y ERA5 | `tools/weather.py` |
+| **Multi-tool reasoning** | Both tools in one turn, dispatched concurrently, reconciled | `core/agent.py` |
+| **Multi-turn memory** | Turns persisted; follow-ups resolve "there" / "instead" | `db.py` |
+| **Citation validation** | Every `[city/SECTION]` checked against chunks actually retrieved | `core/agent.py` |
+| **Semantic cache** | Paraphrase within 0.95 cosine replays the answer, first turn only | `core/cache.py` |
+| **Graceful degradation** | Weather API down → offline table, `FALLBACK_USED` traced | `tools/weather.py` |
+| **Scope awareness** | Booking / unrelated topics refused, never simulated | `core/prompts.py` |
+| **Reasoning trace** | 9 event types, append-only JSONL, replayable offline | `core/trace.py` |
+| **Cost accounting** | Per-turn tokens, cost, latency | `core/trace.py` |
+| **Provider agnostic** | `LLM_MODEL` env var; OpenAI, Anthropic, Groq, Ollama, … | `llm/client.py` |
+| **Eval harness** | 3 layers: deterministic, RAGAS, simulated conversations | `evals/` |
+
+---
 
 ## 2. Quickstart
 
 ```bash
 git clone <repo> && cd tripmate
 uv venv && uv pip install -e ".[dev]"
-cp .env.example .env        # set LLM_MODEL and LLM_API_KEY
 
-uv run tripmate-ingest      # loads 20 chunks into ChromaDB
-uv run tripmate             # CLI
-uv run uvicorn tripmate.adapters.api:app --reload   # API at :8000/docs
+cp .env.example .env          # set LLM_MODEL and LLM_API_KEY
+uv run tripmate-ingest        # loads 20 chunks into ChromaDB (idempotent)
 
+uv run tripmate               # interactive CLI
+```
+
+**No API key?** Set `LLM_MODEL=ollama/qwen3.5` and the whole system runs locally with
+no key at all. Needs roughly 8 GiB free RAM for that model.
+
+### Other entry points
+
+```bash
+uv run uvicorn tripmate.adapters.api:app --reload   # REST API + docs at :8000/docs
+uv run python -m evals.run_evals                    # evaluation scorecard
+uv run pytest -q                                    # 194 tests
 docker build -t tripmate . && docker run -p 8000:8000 --env-file .env tripmate
 ```
 
-Both console scripts (`tripmate`, `tripmate-ingest`) are registered in
-`[project.scripts]` in `pyproject.toml` and were verified to exist there before being
-documented here.
+### CLI commands
 
-**No API key required.** Set `LLM_MODEL=ollama/qwen3.5` and leave `LLM_API_KEY` empty —
-`config.py` treats `ollama`/`ollama_chat` as keyless providers and skips the key check
-entirely. This is the same code path as every other provider; only the model string
-changes. Running Qwen locally needs roughly 8 GiB of free RAM for Ollama to load the
-model — on a machine without that headroom (this development machine included, at 2.8
-GiB free against qwen3.5's 7.9 GiB requirement), use a hosted provider instead
-(`gpt-4o-mini`, `anthropic/claude-haiku-4-5`, `groq/llama-3.3-70b-versatile`) with
-`LLM_API_KEY` set.
+| Command | Does |
+|---|---|
+| `/trace` | Full reasoning trace for the last turn |
+| `/cost` | Session token and dollar total |
+| `/reset` | New session (clears conversation memory) |
+| `/quit` | Exit |
+
+---
 
 ## 3. Architecture
 
-Full diagram, request-flow trace, and a paragraph per component (with the file it lives
-in) are in [`docs/architecture.md`](docs/architecture.md).
+### 3.1 System
 
-In short: both adapters (CLI, FastAPI) call into one `Agent` built by
-`bootstrap.build_agent()`. A query is validated, checked against a semantic cache, then
-sent to the LLM with the tool registry's schemas. If the model requests tools, they run
-concurrently, results go back as tool messages, and the loop repeats (capped at
-`MAX_TOOL_ITERATIONS`) until the model returns a final answer. Citations are validated
-against chunks actually retrieved that turn before the answer is returned.
+```mermaid
+flowchart TB
+    subgraph Adapters["Adapters — thin, no business logic"]
+        CLI["cli.py<br/>REPL + rich trace"]
+        API["api.py<br/>FastAPI + OpenAPI"]
+    end
 
+    BOOT["bootstrap.py :: build_agent()<br/><b>single wiring point</b>"]
+    CLI --> BOOT
+    API --> BOOT
+
+    subgraph Core["Agent core"]
+        AG["agent.py :: chat()"]
+        LOOP["_run_loop()<br/>iteration ceiling 5"]
+        VAL["validate_citations()<br/>anti-fabrication"]
+        AG --> LOOP --> VAL
+    end
+    BOOT --> AG
+
+    subgraph Support["Cross-cutting"]
+        TR["trace.py<br/>9 event types"]
+        CA["cache.py<br/>semantic, first turn"]
+        DB[("db.py<br/>SQLite / Postgres")]
+    end
+    AG <--> CA
+    AG --> TR
+    AG <--> DB
+    TR --> DB
+
+    REG["registry.py<br/><b>schemas from type hints</b>"]
+    LOOP <--> REG
+    REG --> TOOL1["destination.py"]
+    REG --> TOOL2["weather.py"]
+
+    TOOL1 --> STORE["store.py<br/>VectorStore protocol"]
+    STORE --> CHROMA[("ChromaDB<br/>HNSW + metadata")]
+    EMB["fastembed<br/>bge-small-en-v1.5"] --> CHROMA
+    EMB --> CA
+
+    TOOL2 --> OM["openmeteo.py<br/>HTTP transport"]
+    OM --> API1{{"Geocoding"}}
+    OM --> API2{{"Forecast ≤16d"}}
+    OM --> API3{{"Archive / ERA5"}}
+    TOOL2 -.->|"on failure"| MOCK["MOCK_CLIMATE<br/>offline table"]
+
+    LOOP <--> LLM["client.py<br/>LiteLLM"]
+    LLM -.-> P1["OpenAI"]
+    LLM -.-> P2["Anthropic"]
+    LLM -.-> P3["Groq"]
+    LLM -.-> P4["Ollama local"]
+
+    style BOOT fill:#1e3a8a,stroke:#60a5fa,color:#fff
+    style Core fill:#111827,stroke:#3b82f6,color:#fff
+    style REG fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style VAL fill:#065f46,stroke:#10b981,color:#fff
+    style MOCK fill:#7f1d1d,stroke:#ef4444,color:#fff
+```
+
+### 3.2 Request lifecycle
+
+One turn, end to end:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant C as CLI / API
+    participant A as Agent.chat
+    participant Ca as SemanticCache
+    participant L as LLM (LiteLLM)
+    participant R as ToolRegistry
+    participant G as RAG tool
+    participant W as Weather tool
+    participant D as Database
+
+    U->>C: "What should I pack for Tokyo in December?"
+    C->>A: chat(query, session_id)
+    A->>A: validate_query() — reject empty/oversized<br/>before spending a token
+
+    A->>D: history(session_id)
+    D-->>A: prior turns
+    Note over A,Ca: cache consulted only on a session's FIRST turn —<br/>a follow-up is not a standalone question
+    A->>Ca: lookup(query)
+    Ca-->>A: miss
+
+    A->>L: messages + tool schemas
+    L-->>A: tool_calls: [guide, weather]
+
+    par dispatched concurrently
+        A->>R: dispatch(search_destination_guide)
+        R->>G: query="packing tips", city="tokyo"
+        G-->>R: ToolResult(ok, chunks)
+    and
+        A->>R: dispatch(get_weather_forecast)
+        R->>W: city="Tokyo", month="December"
+        W-->>R: ToolResult(ok, climate_normal)
+    end
+    R-->>A: results (order preserved)
+
+    A->>L: messages + tool results
+    L-->>A: final answer with [tokyo/PACKING TIPS]
+
+    A->>A: validate_citations()<br/>strip anything not retrieved
+    A->>D: persist user turn + assistant turn + trace
+    A-->>C: AgentResponse
+    C-->>U: answer + trace + cost
+```
+
+### 3.3 How the agent decides
+
+```mermaid
+flowchart TD
+    Q["User query"] --> V{"Valid?"}
+    V -->|"empty / >2000 chars"| REJ["Reject<br/><b>zero LLM calls</b>"]
+    V -->|ok| F{"First turn<br/>of session?"}
+
+    F -->|yes| CH{"Semantic cache<br/>≥ 0.95?"}
+    F -->|"no — follow-up"| LLM
+    CH -->|hit| REPLAY["Replay cached answer<br/>~10 ms"]
+    CH -->|miss| LLM
+
+    LLM["LLM sees tool schemas<br/>+ conversation history"] --> DEC{"What does it need?"}
+
+    DEC -->|"visa · customs<br/>safety · best time"| G["search_destination_guide"]
+    DEC -->|"temperature<br/>conditions"| W["get_weather_forecast"]
+    DEC -->|"packing —<br/>needs both"| B["BOTH, concurrently"]
+    DEC -->|"greeting · capability"| NONE["Answer directly"]
+    DEC -->|"booking · unrelated"| REF["Refuse —<br/>never simulate"]
+    DEC -->|"destination unclear"| ASK["Ask one<br/>clarifying question"]
+
+    G & W & B --> SYN["Synthesise"]
+    SYN --> CITE{"Every citation<br/>actually retrieved?"}
+    CITE -->|yes| KEEP["Keep"]
+    CITE -->|no| STRIP["Strip it +<br/>trace CITATION_REJECTED"]
+    KEEP & STRIP --> OUT(["Answer"])
+    NONE & REF & ASK --> OUT
+
+    style REJ fill:#7f1d1d,stroke:#ef4444,color:#fff
+    style REF fill:#7f1d1d,stroke:#ef4444,color:#fff
+    style STRIP fill:#7f1d1d,stroke:#ef4444,color:#fff
+    style B fill:#1e3a8a,stroke:#60a5fa,color:#fff
+    style REPLAY fill:#065f46,stroke:#10b981,color:#fff
+    style OUT fill:#065f46,stroke:#10b981,color:#fff
+```
+
+### 3.4 Weather routing — why it isn't just a forecast call
+
+A forecast API reaches about 16 days. *"What should I pack for Tokyo in December?"* is
+not a forecast question — it is a **climate normal**. Getting this wrong is the most
+common way this feature is built badly.
+
+```mermaid
+flowchart LR
+    IN["city + date_or_month"] --> P{"Parse period"}
+    P -->|"unparseable"| ND["no_data<br/><b>no API call made</b>"]
+    P --> C{"In cache?"}
+    C -->|hit| RET(["Return"])
+    C -->|miss| GEO["Geocode<br/><i>any city on earth</i>"]
+
+    GEO --> K{"Within 16 days?"}
+    K -->|yes| FC["Forecast API"] --> SRC1["source: forecast"]
+    K -->|"no — month<br/>or far date"| AR["Archive / ERA5<br/>5 years, that month"] --> SRC2["source: climate_normal"]
+
+    GEO -.->|"timeout /<br/>HTTP error"| FB{"City in<br/>offline table?"}
+    FB -->|yes| MK["source: mock_fallback<br/><b>never cached</b>"]
+    FB -->|no| ERR["ToolResult.error"]
+
+    SRC1 & SRC2 --> SAVE[("Cache<br/>normals: forever<br/>forecasts: 1h")] --> RET
+    MK --> RET
+
+    style ND fill:#78350f,stroke:#f59e0b,color:#fff
+    style MK fill:#7f1d1d,stroke:#ef4444,color:#fff
+    style ERR fill:#7f1d1d,stroke:#ef4444,color:#fff
+    style SRC2 fill:#1e3a8a,stroke:#60a5fa,color:#fff
+```
+
+The `source` field travels with every response, so the agent can say *"typical December
+conditions"* rather than presenting a five-year average as a forecast.
+
+### 3.5 Ingestion pipeline
+
+```mermaid
+flowchart LR
+    F["data/destinations/<br/>4 × .txt"] --> P["chunker.py<br/>split on ALL-CAPS headings"]
+    P --> C["20 chunks<br/>4 cities × 5 sections"]
+    C --> H["id = sha256(city|section|body)<br/><b>content-addressed</b>"]
+    H --> X{"Already<br/>stored?"}
+    X -->|yes| SKIP["skip — re-ingest is a no-op"]
+    X -->|no| E["fastembed<br/>384-dim"]
+    E --> S[("ChromaDB<br/>+ city metadata")]
+
+    style H fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style SKIP fill:#065f46,stroke:#10b981,color:#fff
+```
+
+Content-addressed ids are what make `tripmate-ingest` safe to run on every startup —
+verified: first run ingests 20, second ingests 0.
+
+### 3.6 Multi-turn memory
+
+```mermaid
+stateDiagram-v2
+    [*] --> Fresh: new session
+    Fresh --> T1: "I'm going to Tokyo in December"
+    note right of T1
+        Cache consulted (first turn)
+        Turn pair persisted
+    end note
+
+    T1 --> T2: "What should I pack?"
+    note right of T2
+        Cache SKIPPED — follow-up
+        History supplies Tokyo + December
+        Calls BOTH tools
+    end note
+
+    T2 --> T3: "And is it safe there?"
+    note right of T3
+        "there" resolves to Tokyo
+    end note
+
+    T3 --> T4: "And what about Bangkok instead?"
+    note right of T4
+        Topic (safety) kept
+        City swapped to Bangkok
+    end note
+
+    T4 --> Fresh: /reset
+```
+
+> **A bug this design caught.** The cache originally keyed on query text alone, so
+> *"What should I pack?"* in turn 2 replayed a context-free answer cached from an
+> unrelated session. A follow-up is not a standalone question — the cache is now
+> consulted and populated only on a session's first turn. Standalone repeats still hit.
+
+---
 ## 4. Tool schemas as given to the LLM
 
 Real output of:
@@ -152,47 +464,160 @@ drift apart.
 
 ## 5. Example runs
 
-Five real interactions, captured with `LLM_MODEL=groq/openai/gpt-oss-120b`. Full
-event-by-event traces are committed as JSONL in `traces/`.
+Five real interactions captured on `groq/openai/gpt-oss-120b`. Full event-by-event
+traces are committed as JSONL in [`traces/`](traces/).
 
-| Trace file | Query | Tools called | Events |
+| Trace file | Query | Tools | Events |
 |---|---|---|---|
-| `example_single_tool_rag.jsonl` | Do I need a visa to visit Japan as a tourist? | `search_destination_guide` | 6 |
-| `example_single_tool_weather.jsonl` | How cold does Reykjavik get in January? | `get_weather_forecast` | 7 |
-| `example_multi_tool_packing.jsonl` | What should I pack for Tokyo in December? | **both tools** | 9 |
-| `example_out_of_scope.jsonl` | Can you book my flight to Barcelona? | none | 3 |
-| `example_weather_fallback.jsonl` | Packing query with the weather API unreachable | both, weather degraded | 9 |
+| [`example_single_tool_rag.jsonl`](traces/example_single_tool_rag.jsonl) | Do I need a visa to visit Japan? | `search_destination_guide` | 6 |
+| [`example_single_tool_weather.jsonl`](traces/example_single_tool_weather.jsonl) | How cold does Reykjavik get in January? | `get_weather_forecast` | 7 |
+| [`example_multi_tool_packing.jsonl`](traces/example_multi_tool_packing.jsonl) | What should I pack for Tokyo in December? | **both** | 9 |
+| [`example_out_of_scope.jsonl`](traces/example_out_of_scope.jsonl) | Can you book my flight to Barcelona? | none | 3 |
+| [`example_weather_fallback.jsonl`](traces/example_weather_fallback.jsonl) | Packing query, weather API unreachable | both, degraded | 9 |
 
-**Multi-tool (the case Module 4 grades).** The packing query calls both tools in one
-turn and cites the guide:
+### 5.1 Multi-tool — the case Module 4 grades
+
+**Input:** `What should I pack for Tokyo in December?`
 
 ```
-TOOL_CALL    search_destination_guide  {"query": "packing tips", "city": "tokyo"}
-TOOL_CALL    get_weather_forecast      {"city": "Tokyo", "date_or_month": "December"}
-TOOL_RESULT  search_destination_guide  status=ok
-TOOL_RESULT  get_weather_forecast      status=ok
-ANSWER       citations=[tokyo/PACKING TIPS, tokyo/SAFETY & HEALTH]
+QUERY_RECEIVED      query="What should I pack for Tokyo in December?"
+                    prompt_version=d3322c056668
+LLM_CALL      1.1s  requested_tools=[search_destination_guide, get_weather_forecast]
+TOOL_CALL           search_destination_guide {"query":"packing tips","city":"tokyo"}
+TOOL_CALL           get_weather_forecast     {"city":"Tokyo","date_or_month":"December"}
+TOOL_RESULT     8ms status=ok  texts=["Tokyo — PACKING TIPS\nLayered clothing works..."]
+TOOL_RESULT    2.2s status=ok  source=climate_normal temp_range_c=[2.5, 11.8]
+LLM_CALL      1.4s  (tools omitted — synthesis)
+ANSWER_SYNTHESIZED  citations=[tokyo/PACKING TIPS, tokyo/SAFETY & HEALTH]
 ```
 
-**Out of scope.** Three events, no tool calls, no fabricated action:
+**Output** (abridged):
+
+> **Packing list for Tokyo in December**
+> - **Warm, layered clothing** — base layer, sweaters, insulated coat. *Tokyo's guide recommends layered clothing for seasonal variation* `[tokyo/PACKING TIPS]`
+> - **Comfortable walking shoes** — you'll be on foot a lot `[tokyo/PACKING TIPS]`
+> - **Compact umbrella** — December is generally dry, about 6 rainy days
+> - **Reusable water bottle** — tap water is safe to drink `[tokyo/SAFETY & HEALTH]`
+>
+> Typical December: 2.5–11.8 °C, mild and mostly dry.
+
+The agent worked out unprompted that packing advice needs *both* the guide's tips and
+the actual conditions, then reconciled them.
+
+### 5.2 Single tool — RAG
+
+**Input:** `Do I need a visa to visit Japan as a tourist?`
+
+```
+QUERY_RECEIVED  →  LLM_CALL (requested: search_destination_guide)
+TOOL_CALL          search_destination_guide {"query":"visa entry requirements","city":"tokyo"}
+TOOL_RESULT        status=ok
+LLM_CALL           ANSWER_SYNTHESIZED citations=[tokyo/VISA & ENTRY]
+```
+
+One tool. Nothing instructed it — the choice came from the schema descriptions.
+
+### 5.3 Out of scope — Module 5
+
+**Input:** `Can you book my flight to Barcelona?`
+
+```
+QUERY_RECEIVED  →  LLM_CALL  →  ANSWER_SYNTHESIZED
+(no TOOL_CALL events at all)
+```
 
 > I'm sorry — I can't book, change, or pay for flights or any other reservations. I can,
-> however, help you with travel-related information such as visa requirements, the best
-> time to visit, local customs, packing tips and safety notes.
+> however, help with visa requirements, the best time to visit, local customs, packing
+> tips, safety notes, or typical weather for Barcelona.
 
-**Failure path.** With `httpx` patched to raise a timeout, the weather tool falls back to
-its offline table rather than failing the turn. The degradation is visible in the trace,
-never silent:
+Three events, no tool calls, **no invented confirmation number**. The eval suite asserts
+the answer never contains "booked", "confirmed" or "reservation number".
+
+### 5.4 Failure path — graceful degradation
+
+**Input:** same packing query, with the weather API unreachable.
 
 ```
 TOOL_RESULT    get_weather_forecast  status=ok
 FALLBACK_USED  get_weather_forecast
 ```
 
-The agent still answers, and the response carries `source: mock_fallback` so it can say
-the figures are approximate offline data rather than presenting them as live.
+The agent still answers, using the offline climate table, and the response carries
+`source: mock_fallback` so it can tell the user the figures are approximate. The
+degradation is visible in the trace — never silent.
 
-## 6. Design decisions
+### 5.5 Multi-turn
+
+```
+> I'm planning a trip to Tokyo in December.     tools=[guide, weather]
+> What should I pack?                            tools=[weather, guide]  ← inherited Tokyo
+> And is it safe there?                          tools=[guide]           ← "there" = Tokyo
+> And what about Bangkok instead?                tools=[guide]           ← topic kept, city swapped
+```
+
+Turn 4 is the interesting one: it retained the *topic* (safety) from turn 3 while
+switching the *city*.
+
+---
+
+## 6. Interfaces
+
+### REST API
+
+Three endpoints, all with typed OpenAPI schemas at `/docs`.
+
+```mermaid
+flowchart LR
+    C["Client"] -->|"POST /chat"| A["FastAPI"]
+    C -->|"GET /health"| A
+    C -->|"GET /sessions/{id}"| A
+    A --> AG["same Agent<br/>the CLI uses"]
+    style AG fill:#1e3a8a,stroke:#60a5fa,color:#fff
+```
+
+| Endpoint | Returns |
+|---|---|
+| `POST /chat` | `{answer, citations[], trace[], prompt_tokens, completion_tokens, cost_usd, latency_ms, session_id, was_cached}` |
+| `GET /health` | `{status, model, tools[], chunk_count}` |
+| `GET /sessions/{id}` | `{session_id, turns[]}` |
+
+```bash
+curl -X POST localhost:8000/chat -H 'content-type: application/json' \
+  -d '{"query":"What should I pack for Tokyo in December?","session_id":"demo"}'
+```
+
+Verified live: `/health` reports `chunk_count: 20`; passing the same `session_id` twice
+gives multi-turn over HTTP, and `/sessions/demo` returns the full conversation.
+
+### Configuration
+
+Everything is environment-driven and validated at startup — a missing key fails
+immediately with a clear message, not mid-conversation.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LLM_MODEL` | `gpt-4o-mini` | Any LiteLLM model string |
+| `LLM_API_KEY` | — | Mapped to the provider's own variable automatically |
+| `LLM_BASE_URL` | — | Override endpoint (Ollama, vLLM, gateway) |
+| `LLM_TEMPERATURE` | `0.2` | Low: tool calling wants determinism |
+| `RAG_TOP_K` | `4` | Chunks retrieved per search |
+| `RAG_MIN_SCORE` | `0.25` | Similarity floor; below it, return nothing |
+| `MAX_TOOL_ITERATIONS` | `5` | Loop ceiling |
+| `SEMANTIC_CACHE_THRESHOLD` | `0.95` | Cosine similarity for a replay |
+| `WEATHER_TIMEOUT_S` | `3` | Before falling back offline |
+| `DATABASE_URL` | `sqlite:///./tripmate.db` | `postgresql+psycopg://…` also works |
+
+**Provider swap is config-only.** Verified across three models — same code, `LLM_MODEL`
+changed, all three correctly chose both tools:
+
+| Model | Tools chosen | Latency |
+|---|---|---|
+| `groq/openai/gpt-oss-120b` | both | 4447 ms |
+| `groq/openai/gpt-oss-20b` | both | 1527 ms |
+| `groq/qwen/qwen3.8-27b` | both | 1679 ms |
+
+---
+## 7. Design decisions
 
 | # | Decision | Choice | Rationale | Rejected |
 |---|---|---|---|---|
@@ -214,7 +639,7 @@ the figures are approximate offline data rather than presenting them as live.
 > workflows, branching multi-agent handoff. The tool registry is framework-agnostic, so the
 > tools port to LangGraph unchanged if the flow later becomes branchy.
 
-## 7. Evaluation
+## 8. Evaluation
 
 Agents fail probabilistically, so functional tests alone are not sufficient evidence
 the system works. The eval harness (`evals/`) has three layers of increasing cost and
@@ -307,50 +732,72 @@ error; pinning `langchain-community<0.3` trades it for a different one
 `ragas`, `langchain-core` and `langchain-community`, which is left as a known limitation
 rather than pinned by guesswork.
 
-## 8. Testing
+## 9. Testing
 
-```bash
-uv run pytest --cov --cov-report=term-missing
+```mermaid
+flowchart LR
+    subgraph Real["Real, not mocked"]
+        A["ChromaDB<br/>20 real chunks"]
+        B["SQLite database"]
+        C["Both tools"]
+        D["Trace files on disk"]
+    end
+    subgraph Fake["Scripted"]
+        E["FakeLLMClient<br/><i>identical signature<br/>to LLMClient</i>"]
+    end
+    Real --> T["194 tests<br/>no API key<br/>no network<br/>no flake"]
+    Fake --> T
+    style Fake fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style T fill:#065f46,stroke:#10b981,color:#fff
 ```
 
-189 tests, **95.98% line coverage** against the `fail_under = 80` gate in
-`pyproject.toml` (`[tool.coverage.report]`). No test requires network access or an API
-key: the `FakeLLMClient` (`tests/fakes.py`) replays canned tool-call sequences so
-tool-selection and integration tests run deterministically in CI, and HTTP calls to
-Open-Meteo are mocked with `respx`.
+Everything is real except the model. `FakeLLMClient` replays scripted responses and
+records every request; it satisfies the same `SupportsComplete` protocol as the real
+client, which is what lets the whole suite run in CI for free.
 
 | File | Covers |
 |---|---|
-| `test_registry.py` | Schema derivation from type hints, argument validation, unknown-tool handling |
-| `test_tools_destination.py` | Retrieval relevance, city metadata filter, score floor, empty result |
-| `test_tools_weather.py` | Forecast path, climate-normal path, geocode miss, timeout → fallback (HTTP mocked with `respx`) |
-| `test_tool_selection.py` | Single-tool, multi-tool, and no-tool routing with a scripted fake model over real tools |
-| `test_error_scenarios.py` | One named test per §6 error scenario in the design spec (unknown destination, missing weather data, ambiguous query, tool failure/timeout, out-of-scope request, malformed/empty input) |
-| `test_integration_multitool.py` | Full packing flow end-to-end: real RAG, real Chroma, real DB, real cache, fake LLM |
-| `test_agent.py` | Core loop behavior: forced synthesis, citation extraction/validation, empty-answer fallback |
-| `test_api.py` | FastAPI routes: `/chat`, `/health`, `/sessions/{id}` |
-| `test_bootstrap.py` | The shared wiring point builds a working agent |
-| `test_cache.py` | Semantic cache hit/miss threshold behavior, cosine similarity |
-| `test_chunker.py` | Section-aware guide parsing, deterministic chunk ids |
-| `test_config.py` | Provider parsing from `LLM_MODEL`, key-required vs. keyless providers, `ConfigError` |
-| `test_db.py` | Session/turn/trace persistence round-trips |
-| `test_evals_deterministic.py` | The deterministic eval scorer itself |
-| `test_evals_simulation.py` | The simulation scorer's goal/context matching |
-| `test_llm_client.py` | LiteLLM response parsing, cost extraction, error wrapping |
-| `test_models.py` | Model defaults and `ref` property shapes |
-| `test_store.py` | `ChromaStore` idempotent add, count |
-| `test_trace.py` | Trace event numbering, JSONL flush/reload |
+| `test_config.py` | Settings validation, provider→env-var mapping |
+| `test_models.py` | Domain types, citation parsing |
+| `test_registry.py` | Schema derivation, arg validation, exception containment |
+| `test_chunker.py` | Section splitting, content-hashed ids |
+| `test_store.py` | Retrieval, city filter, score floor, idempotent ingest |
+| `test_tools_destination.py` | RAG tool, `no_data` path, thread-safe init |
+| `test_tools_weather.py` | Both routing paths, cache, timeout → fallback |
+| `test_llm_client.py` | Response parsing, malformed tool args |
+| `test_trace.py` | Event recording, totals, append-only JSONL, replay |
+| `test_db.py` | Sessions, turns, history ordering, rollback |
+| `test_cache.py` | Cosine, threshold, disabled cache, citation round-trip |
+| `test_agent.py` | The loop, citations, ceiling, multi-turn regressions |
+| `test_tool_selection.py` | Single / multi / no-tool routing |
+| `test_error_scenarios.py` | All six scenarios named in the brief |
+| `test_integration_multitool.py` | Full flow: real RAG + DB + cache |
+| `test_api.py` | All three endpoints |
+| `test_evals_*.py` | Scoring logic |
 
-Weakest files by coverage: `llm/client.py` (66% — the untested lines are the
-`litellm.completion` exception-wrapping and cost-extraction branches, which need a
-failing or unpriced provider response to exercise), `rag/ingest.py` (69% — the
-`main()` CLI entry point and its print statement aren't exercised by tests calling
-`ingest()` directly), and `adapters/api.py` (86% — a couple of error branches in
-`/sessions/{id}` and the chunk-count-lookup exception handler in `/health`). None of
-these are below the 80% gate individually in a way that would fail CI; the total is
-what the gate checks.
+```bash
+uv run pytest -q                              # 194 passed
+uv run pytest --cov --cov-report=term-missing # 96% (gate at 80)
+```
 
-## 9. Scalability
+**Error scenarios** — one named test per bullet in the brief:
+
+| Scenario | Tests |
+|---|---|
+| Unknown / unsupported destination | 2 |
+| Missing or incomplete weather data | 2 |
+| Ambiguous user query | 1 |
+| Tool failure or timeout | 3 |
+| Out-of-scope request | 2 |
+| Malformed or empty input | 3 |
+
+One test worth explaining: in `test_integration_multitool.py` the script holds exactly
+two LLM responses, both consumed by the first query. The second identical query must be
+served from cache — if it weren't, the exhausted fake would raise `script exhausted`.
+**The test passing is the proof the cache prevented the LLM calls.**
+
+---
+## 10. Scalability
 
 **RAG from 4 cities to several hundred.** 4 cities and 4,000 cities run *identical
 code paths*. 400 cities is ~2,000 chunks; 4,000 is ~20,000 — well within Chroma's HNSW
@@ -377,7 +824,7 @@ Past that, embed tool descriptions and send only the top-K most relevant to the 
 `ToolRegistry.schemas()` is the single seam where this plugs in. Beyond ~50 tools,
 hierarchical routing: pick a tool *category* first, then a tool within it.
 
-## 10. Known limitations
+## 11. Known limitations
 
 - The destination pack is a simplified reference dataset, not authoritative travel or
   visa advice. The agent states this.
@@ -392,7 +839,7 @@ hierarchical routing: pick a tool *category* first, then a tool within it.
 - Evaluation dataset is ~30 queries, hand-authored — enough to catch regressions, not
   enough for statistical confidence.
 
-## 11. Future improvements
+## 12. Future improvements
 
 1. Reranking stage (retrieve top-20, rerank to top-4) once the corpus exceeds a few
    thousand chunks
@@ -404,7 +851,7 @@ hierarchical routing: pick a tool *category* first, then a tool within it.
 7. OpenTelemetry export — the trace event model already fits the span shape
 8. Conversation summarization for long sessions
 
-## 12. Deliberately out of scope
+## 13. Deliberately out of scope
 
 | Excluded | Why |
 |---|---|
