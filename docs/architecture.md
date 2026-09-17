@@ -3,61 +3,59 @@
 ## Diagram
 
 ```mermaid
-flowchart TD
-    CLI[CLI adapter<br/>rich trace rendering] --> AG
-    API[FastAPI adapter<br/>POST /chat] --> AG
+flowchart TB
+    subgraph Adapters["Adapters — thin, no business logic"]
+        CLI["cli.py"]
+        API["api.py"]
+    end
+    BOOT["bootstrap.py :: build_agent()<br/><b>single wiring point</b>"]
+    CLI --> BOOT
+    API --> BOOT
 
-    AG[Agent core<br/>orchestration loop] --> VAL[Input validation]
-    AG --> SC[Semantic query cache]
-    AG --> LLM[LLM client<br/>LiteLLM]
-    AG --> REG[Tool registry<br/>schemas from type hints]
-    AG --> TR[Trace recorder<br/>structured events]
+    subgraph Graph["LangGraph StateGraph"]
+        CC["check_cache"] -->|proceed| AGN["agent"]
+        AGN -->|tools_condition| TN["tools — ToolNode"]
+        TN --> CR["collect_refs"] --> AGN
+        AGN -->|no tool calls| VC["validate_citations"] --> SC["store_cache"]
+    end
+    BOOT --> FACADE["agent.py :: Agent.chat()"] --> Graph
+    CP[("SqliteSaver<br/>conversation state")] <--> Graph
 
-    LLM -.-> P1[OpenAI]
-    LLM -.-> P2[Anthropic]
-    LLM -.-> P3[Groq]
-    LLM -.-> P4[Ollama local]
+    ADP["graph/tool_adapter.py"] --> REG["registry.py<br/>schemas from type hints"]
+    TN --> ADP
+    REG --> T1["destination.py"] --> VS[("ChromaDB")]
+    REG --> T2["weather.py"] --> OM["openmeteo.py"]
+    T2 -.->|on failure| MOCK["MOCK_CLIMATE"]
 
-    REG --> T1[search_destination_guide]
-    REG --> T2[get_weather_forecast]
+    AGN <--> LLM["init_chat_model"]
+    Graph --> TR["trace.py"] --> DB[("SQLAlchemy<br/>cache + traces")]
+    CC <--> CACHE["cache.py"]
 
-    T1 --> VS[VectorStore Protocol]
-    VS --> CH[(ChromaDB<br/>HNSW + metadata)]
-    EMB[fastembed<br/>bge-small-en-v1.5] --> CH
-
-    T2 --> OM{Open-Meteo}
-    OM --> GEO[Geocoding API]
-    OM --> FC[Forecast API<br/>date within 16 days]
-    OM --> AR[Archive/ERA5 API<br/>month -> climate normal]
-    T2 -.timeout/failure.-> MOCK[Mock lookup<br/>4 pack cities]
-    T2 --> DC[(diskcache)]
-
-    TR --> DB[(SQLAlchemy<br/>SQLite / Postgres)]
-    AG --> OUT[Answer + citations<br/>+ cost + latency]
+    style Graph fill:#111827,stroke:#3b82f6,color:#fff
+    style CP fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style MOCK fill:#7f1d1d,stroke:#ef4444,color:#fff
 ```
 
 ## Request flow
 
 ```
 query
-  |
-  1. validate at boundary ......... empty / >2000 chars / non-text -> reject, zero LLM spend
-  2. semantic cache probe ......... cosine >= 0.95 vs past queries -> replay, emit CACHE_HIT
-  3. LLM call  <---------------+ ... messages = system + history + user
-  |    tool schemas from registry (auto-derived from type hints)
-  4. tool_calls returned?      |
-  |    a. validate args (per-tool pydantic model)
-  |    b. dispatch in PARALLEL (ThreadPoolExecutor) - independent tools overlap
-  |    c. each: timeout -> retry x1 -> fallback; never raises into the loop
-  |    d. append tool results --+ ... max MAX_TOOL_ITERATIONS, then force-synthesize
-  5. final answer
-       + citations [tokyo/PACKING TIPS]
-       + citation validation (strip any not present in retrieved chunk ids)
-       + trace footer: tools used | latency | tokens | cost USD
+  1. Agent.chat validates input .............. empty / >2000 chars -> reject, 0 LLM calls
+  2. graph.invoke(thread_id=session_id) ...... checkpointer reloads prior messages
+  3. check_cache ............................. first turn only; a hit routes to END
+  4. agent ................................... LLM with tool schemas bound
+  5. tools_condition ......................... tool calls present -> tools, else -> validate
+  6. ToolNode ................................ executes; adapter serialises ToolResult
+  7. collect_refs ............................ trace events + citation whitelist
+  8. (loop back to agent)
+  9. validate_citations ...................... strips any ungrounded [city/SECTION]
+ 10. store_cache ............................. first turn only
+     -> answer + citations + trace + cost
 ```
 
-The loop is provider-agnostic. The identical code path runs against GPT-4o-mini, Claude,
-Llama-3.3 on Groq, or local Qwen — LiteLLM normalizes the tool-call response shape.
+The recursion limit derives from `max_tool_iterations`; exceeding it raises
+`GraphRecursionError`, which the facade converts into the empty-answer fallback rather
+than surfacing a framework exception.
 
 ## Components
 
@@ -79,12 +77,12 @@ the database, and constructs the `Agent`. Not in the original spec's module tabl
 added so the CLI and API adapters cannot wire the agent two different ways and drift
 apart.
 
-**Agent core — `src/tripmate/core/agent.py`**
-The orchestration loop (`Agent.chat`). Validates input, probes the semantic cache, calls
-the LLM, dispatches any requested tools concurrently via `ThreadPoolExecutor`, feeds
-results back as tool messages, and repeats until the model stops requesting tools or
-`MAX_TOOL_ITERATIONS` is hit (at which point it force-synthesizes from whatever tool
-output exists). Citation validation and trace emission happen here too.
+**Agent facade — `src/tripmate/core/agent.py`**
+
+Public surface (`chat`, `registry`, `settings`, `graph`) plus the pure helpers
+`validate_query`, `extract_citations` and `validate_citations`. Input validation stays
+outside the graph so malformed input costs zero LLM calls. Orchestration itself lives in
+`graph/`.
 
 **System prompt — `src/tripmate/core/prompts.py`**
 The versioned system prompt (`SYSTEM_PROMPT`, `PROMPT_VERSION`) that encodes tool
@@ -104,12 +102,34 @@ retrieval, compares it against previously stored query embeddings by cosine
 similarity, and replays the stored answer above `SEMANTIC_CACHE_THRESHOLD`. Persisted
 in the `query_cache` table via `Database`.
 
-**LLM client — `src/tripmate/llm/client.py`**
-`LLMClient` wraps `litellm.completion`, parses the response into the internal
-`LLMResponse`/`ToolCall` shape regardless of provider, and extracts token counts and
-cost via `litellm.completion_cost`. `build_llm_client` reads `Settings` and calls
-`settings.export_provider_key()` first so LiteLLM finds the right provider-specific
-environment variable.
+**Graph state — `src/tripmate/graph/state.py`**
+
+`AgentState` TypedDict. `messages` uses LangGraph's `add_messages` reducer so nodes
+return deltas. Holds only primitives: the checkpointer serialises state, and custom
+types there are forward-incompatible.
+
+**Graph nodes — `src/tripmate/graph/nodes.py`**
+
+Each node is a pure function of state returning a partial update, built by a factory so
+dependencies are injected rather than imported. That is what makes them unit-testable
+without running a turn.
+
+**Graph builder — `src/tripmate/graph/builder.py`**
+
+Wires the nodes and compiles. `tools_condition` is the conditional edge that makes tool
+selection a graph primitive.
+
+**Tool adapter — `src/tripmate/graph/tool_adapter.py`**
+
+Turns registry `ToolSpec`s into LangChain `StructuredTool`s, reusing the pydantic model
+the `@tool` decorator derived from type hints. The registry stays the single source of
+truth, and neither tool module knows LangGraph exists.
+
+**Chat model — `src/tripmate/bootstrap.py`**
+
+`init_chat_model` for providers with an installed integration, falling back to
+`ChatOpenAI` against the provider's OpenAI-compatible endpoint. `LLM_MODEL` alone
+selects the provider.
 
 **Tool registry — `src/tripmate/tools/registry.py`**
 The `@tool` decorator inspects a function's type hints and `Annotated` metadata and
@@ -156,6 +176,10 @@ makes `ingest` idempotent. `load_all` parses every guide in a directory.
 store. `main()` is the `tripmate-ingest` console script entry point.
 
 **Persistence — `src/tripmate/db.py`**
+
+Note: conversation history is owned by LangGraph's `SqliteSaver`, not by this module.
+`db.py` backs the semantic cache and trace rows only.
+
 `Database` wraps a SQLAlchemy engine and session factory (pool settings applied only
 for non-SQLite URLs). Four tables: `sessions`, `turns`, `trace_records`, `query_cache`.
 `SessionStore` is the read/write API the agent and cache use — `add_turn`,
