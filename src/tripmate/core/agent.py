@@ -134,6 +134,16 @@ class Agent:
         return self._registry
 
     @property
+    def store(self) -> SessionStore | None:
+        """The conversation store, if one was configured.
+
+        Adapters reuse this rather than constructing a second SessionStore over the
+        same database — two stores would work, but the API would then be reporting
+        history from a different object than the one the agent actually writes to.
+        """
+        return self._store
+
+    @property
     def settings(self) -> Settings:
         """The resolved settings this agent was constructed with."""
         return self._settings

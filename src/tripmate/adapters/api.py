@@ -17,6 +17,7 @@ from tripmate.bootstrap import build_agent
 from tripmate.config import Settings
 from tripmate.core.agent import Agent
 from tripmate.db import SessionStore
+from tripmate.rag.store import build_store
 
 # Single source of truth is pyproject's [project].version; a literal here would let the
 # documented API version drift from the package that is actually installed.
@@ -80,11 +81,11 @@ def create_app(
         tools = active.registry.names()
 
         chunk_count = None
-        if _active_store:
-            try:
-                chunk_count = _active_store.count()
-            except Exception:
-                chunk_count = None
+        try:
+            store = _active_store or build_store(active.settings)
+            chunk_count = store.count()
+        except Exception:
+            chunk_count = None  # vector store unavailable is not a health failure
 
         return HealthResponse(status="ok", model=model, tools=tools, chunk_count=chunk_count)
 
@@ -108,10 +109,14 @@ def create_app(
     @app.get("/sessions/{session_id}", response_model=SessionHistoryResponse)
     def get_session(session_id: str) -> SessionHistoryResponse:
         """Retrieve the history of a session."""
-        if not _active_store:
+        # Fall back to the agent's own store: the module-level `app = create_app()`
+        # injects nothing, and build_agent() has already built a SessionStore. Without
+        # this the endpoint is permanently 404 in production while passing its tests.
+        store = _active_store or _ensure_agent().store
+        if store is None:
             raise HTTPException(status_code=404, detail="Session store not configured")
 
-        history = _active_store.history(session_id)
+        history = store.history(session_id)
         if not history:
             raise HTTPException(status_code=404, detail="Session not found")
 
