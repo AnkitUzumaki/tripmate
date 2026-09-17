@@ -104,18 +104,18 @@ mindmap
 
 | Capability | How it works | Where |
 |---|---|---|
-| **Dynamic tool selection** | Tool schemas derived from type hints, handed to the LLM; it chooses | `tools/registry.py` |
+| **Dynamic tool selection** | LangGraph `tools_condition` routes on the model's own tool calls | `graph/builder.py` |
 | **RAG retrieval** | ChromaDB, cosine, city metadata pre-filter, score floor | `rag/store.py` |
 | **Weather** | Open-Meteo: forecast ≤16 days, else climate normal from 5y ERA5 | `tools/weather.py` |
-| **Multi-tool reasoning** | Both tools in one turn, dispatched concurrently, reconciled | `core/agent.py` |
-| **Multi-turn memory** | Turns persisted; follow-ups resolve "there" / "instead" | `db.py` |
-| **Citation validation** | Every `[city/SECTION]` checked against chunks actually retrieved | `core/agent.py` |
+| **Multi-tool reasoning** | Both tools in one turn via `ToolNode`, reconciled by the agent node | `graph/nodes.py` |
+| **Multi-turn memory** | `SqliteSaver` checkpointer, keyed on session id | `bootstrap.py` |
+| **Citation validation** | A graph node; every `[city/SECTION]` checked against chunks retrieved | `graph/nodes.py` |
 | **Semantic cache** | Paraphrase within 0.95 cosine replays the answer, first turn only | `core/cache.py` |
 | **Graceful degradation** | Weather API down → offline table, `FALLBACK_USED` traced | `tools/weather.py` |
 | **Scope awareness** | Booking / unrelated topics refused, never simulated | `core/prompts.py` |
 | **Reasoning trace** | 9 event types, append-only JSONL, replayable offline | `core/trace.py` |
 | **Cost accounting** | Per-turn tokens, cost, latency | `core/trace.py` |
-| **Provider agnostic** | `LLM_MODEL` env var; OpenAI, Anthropic, Groq, Ollama, … | `llm/client.py` |
+| **Provider agnostic** | `LLM_MODEL` env var via `init_chat_model` | `bootstrap.py` |
 | **Eval harness** | 3 layers: deterministic, RAGAS, simulated conversations | `evals/` |
 
 ---
@@ -170,12 +170,14 @@ flowchart TB
     CLI --> BOOT
     API --> BOOT
 
-    subgraph Core["Agent core"]
-        AG["agent.py :: chat()"]
-        LOOP["_run_loop()<br/>iteration ceiling 5"]
-        VAL["validate_citations()<br/>anti-fabrication"]
-        AG --> LOOP --> VAL
+    subgraph Core["Agent core — LangGraph"]
+        AG["agent.py :: chat()<br/><i>facade</i>"]
+        GR["graph/builder.py<br/><b>StateGraph</b>"]
+        ND["graph/nodes.py<br/>check_cache · agent · collect_refs<br/>validate_citations · store_cache"]
+        AG --> GR --> ND
     end
+    CP[("SqliteSaver<br/>conversation state")]
+    GR <--> CP
     BOOT --> AG
 
     subgraph Support["Cross-cutting"]
@@ -189,7 +191,8 @@ flowchart TB
     TR --> DB
 
     REG["registry.py<br/><b>schemas from type hints</b>"]
-    LOOP <--> REG
+    ADP["graph/tool_adapter.py<br/>ToolSpec to StructuredTool"]
+    ND <--> ADP --> REG
     REG --> TOOL1["destination.py"]
     REG --> TOOL2["weather.py"]
 
@@ -204,7 +207,7 @@ flowchart TB
     OM --> API3{{"Archive / ERA5"}}
     TOOL2 -.->|"on failure"| MOCK["MOCK_CLIMATE<br/>offline table"]
 
-    LOOP <--> LLM["client.py<br/>LiteLLM"]
+    GR <--> LLM["init_chat_model<br/>LangChain"]
     LLM -.-> P1["OpenAI"]
     LLM -.-> P2["Anthropic"]
     LLM -.-> P3["Groq"]
@@ -212,6 +215,7 @@ flowchart TB
 
     style BOOT fill:#1e3a8a,stroke:#60a5fa,color:#fff
     style Core fill:#111827,stroke:#3b82f6,color:#fff
+    style CP fill:#7c3aed,stroke:#a78bfa,color:#fff
     style REG fill:#7c3aed,stroke:#a78bfa,color:#fff
     style VAL fill:#065f46,stroke:#10b981,color:#fff
     style MOCK fill:#7f1d1d,stroke:#ef4444,color:#fff
@@ -267,42 +271,65 @@ sequenceDiagram
     C-->>U: answer + trace + cost
 ```
 
-### 3.3 How the agent decides
+### 3.3 The graph
+
+The orchestration is a LangGraph `StateGraph`. This is the workflow, not a
+simplification of it:
 
 ```mermaid
 flowchart TD
-    Q["User query"] --> V{"Valid?"}
-    V -->|"empty / >2000 chars"| REJ["Reject<br/><b>zero LLM calls</b>"]
-    V -->|ok| F{"First turn<br/>of session?"}
+    START([START]) --> CC["check_cache"]
+    CC -->|"cache_hit"| E([END])
+    CC -->|"proceed"| AG["agent<br/><i>LLM + tool schemas</i>"]
+    AG -->|"tools_condition<br/>tool calls present"| TN["tools<br/><i>ToolNode</i>"]
+    TN --> CR["collect_refs<br/><i>trace + citation whitelist</i>"]
+    CR --> AG
+    AG -->|"tools_condition<br/>no tool calls"| VC["validate_citations"]
+    VC --> SC["store_cache"]
+    SC --> E
 
-    F -->|yes| CH{"Semantic cache<br/>≥ 0.95?"}
-    F -->|"no — follow-up"| LLM
-    CH -->|hit| REPLAY["Replay cached answer<br/>~10 ms"]
-    CH -->|miss| LLM
-
-    LLM["LLM sees tool schemas<br/>+ conversation history"] --> DEC{"What does it need?"}
-
-    DEC -->|"visa · customs<br/>safety · best time"| G["search_destination_guide"]
-    DEC -->|"temperature<br/>conditions"| W["get_weather_forecast"]
-    DEC -->|"packing —<br/>needs both"| B["BOTH, concurrently"]
-    DEC -->|"greeting · capability"| NONE["Answer directly"]
-    DEC -->|"booking · unrelated"| REF["Refuse —<br/>never simulate"]
-    DEC -->|"destination unclear"| ASK["Ask one<br/>clarifying question"]
-
-    G & W & B --> SYN["Synthesise"]
-    SYN --> CITE{"Every citation<br/>actually retrieved?"}
-    CITE -->|yes| KEEP["Keep"]
-    CITE -->|no| STRIP["Strip it +<br/>trace CITATION_REJECTED"]
-    KEEP & STRIP --> OUT(["Answer"])
-    NONE & REF & ASK --> OUT
-
-    style REJ fill:#7f1d1d,stroke:#ef4444,color:#fff
-    style REF fill:#7f1d1d,stroke:#ef4444,color:#fff
-    style STRIP fill:#7f1d1d,stroke:#ef4444,color:#fff
-    style B fill:#1e3a8a,stroke:#60a5fa,color:#fff
-    style REPLAY fill:#065f46,stroke:#10b981,color:#fff
-    style OUT fill:#065f46,stroke:#10b981,color:#fff
+    style CC fill:#7c3aed,stroke:#a78bfa,color:#fff
+    style AG fill:#1e3a8a,stroke:#60a5fa,color:#fff
+    style TN fill:#78350f,stroke:#f59e0b,color:#fff
+    style VC fill:#065f46,stroke:#10b981,color:#fff
 ```
+
+`tools_condition` is LangGraph's built-in router: it inspects the last message for tool
+calls and routes accordingly. **Dynamic tool selection is therefore an edge in the
+graph**, not a branch inside a method.
+
+The semantic cache is a routing decision rather than an early return. Its "first turn of
+a session only" rule — a follow-up like *"What should I pack?"* is not a standalone
+question — is an explicit condition on that edge.
+
+**State** (`graph/state.py`):
+
+```python
+class AgentState(TypedDict, total=False):
+    messages: Annotated[list[AnyMessage], add_messages]
+    query: str
+    allowed_refs: list[str]   # chunks actually retrieved this turn
+    citations: list[str]
+    answer: str
+    was_cached: bool
+    is_first_turn: bool
+```
+
+`add_messages` is LangGraph's reducer: nodes return only the messages they add.
+`allowed_refs` is the anti-fabrication whitelist — `validate_citations` strips any
+citation not in it.
+
+**Conversation history** comes from a `SqliteSaver` checkpointer keyed on
+`thread_id = session_id`. Nothing in application code writes turns.
+
+| Node | Responsibility |
+|---|---|
+| `check_cache` | Semantic lookup, first turn only; routes straight to END on a hit |
+| `agent` | Calls the LLM with tool schemas bound; records `LLM_CALL` and `TOOL_CALL` |
+| `tools` | LangGraph's `ToolNode` executes the requested tools |
+| `collect_refs` | Records `TOOL_RESULT`/`TOOL_ERROR`/`FALLBACK_USED`, accumulates refs |
+| `validate_citations` | Strips ungrounded citations, records `CITATION_REJECTED` |
+| `store_cache` | Populates the cache, first turn only |
 
 ### 3.4 Weather routing — why it isn't just a forecast call
 
@@ -624,23 +651,66 @@ changed, all three correctly chose both tools:
 
 | # | Decision | Choice | Rationale | Rejected |
 |---|---|---|---|---|
-| D1 | LLM provider | **LiteLLM**, provider set by env | User picks any model: OpenAI, Anthropic, Gemini, Groq, Ollama. One dependency normalizes tool-call schemas across all of them. | Hand-rolled per-provider adapters — LiteLLM already does this |
-| D2 | Orchestration | **Raw function-calling loop** (~90 lines) | Every line is explainable on video; the reasoning trace is ours to emit; no framework lock-in; the flow is one loop with one branch | LangChain (heavy, trace buried in callbacks); LangGraph (state-graph machinery for a non-branchy flow) |
+| D1 | LLM provider | **`init_chat_model`**, provider set by env, with an OpenAI-compatible fallback | `LLM_MODEL` alone selects the provider. Native integration where the package is installed (anthropic, groq, ollama); otherwise the provider's OpenAI-compatible endpoint. LiteLLM is retained only for its price table. | Hand-rolled per-provider adapters; hardcoding one SDK |
+| D2 | Orchestration | **LangGraph `StateGraph`** with a SQLite checkpointer | Explicit state, nodes and edges; `tools_condition` makes dynamic tool selection a graph primitive; the checkpointer owns conversation history so it cannot be forgotten. See §7.1. | LangChain `AgentExecutor` (state is implicit); CrewAI (multi-agent framing this does not need); a custom loop (replaced — see §7.1) |
 | D3 | Vector store | **ChromaDB (persistent)** behind a `VectorStore` Protocol | Metadata pre-filtering by city is *required* at scale and cannot be bolted on later without reshaping the tool signature. HNSW index — identical code path at 20 or 200k chunks | numpy cosine (no metadata filter); FAISS (no metadata/persistence ergonomics); pgvector (infra for a take-home) |
 | D4 | Embeddings | **`fastembed`** (`BAAI/bge-small-en-v1.5`, ONNX) | ~50MB, no PyTorch. Local and keyless — preserves D1's promise that Ollama alone is sufficient | `sentence-transformers` (drags in ~800MB torch); OpenAI embeddings (couples RAG to one provider, breaks D1) |
 | D5 | Weather | **Open-Meteo dual-path** + disk cache + mock fallback | Forecast APIs reach 16 days; the grading query ("packing for Tokyo in December") needs a **climate normal**. Geocoding resolves any city on earth | Forecast-only (fails Module 4); pure mock table (dies past 4 cities) |
 | D6 | Differentiators | Tier 1 + Tier 2 (eval harness, citations, semantic cache, parallel dispatch, cost accounting, multi-turn) | Depth on graded axes over breadth of features | Tier 3 padding — see §12 below |
 | D7 | API layer | **FastAPI**, thin adapter over the same `Agent` | Largest single JD bullet. ~50 lines. Mirrors the same adapter-over-one-core pattern as the CLI | Flask (JD accepts either; FastAPI is async-native and self-documenting) |
 | D8 | Container | **Multi-stage Dockerfile** | Makes the "multi-stage build" claim demonstrable | docker-compose stack, k8s manifests — padding here |
-| D9 | Persistence | **SQLAlchemy over SQLite, Postgres-ready** | Sessions and traces persisted; `DATABASE_URL` swaps to Postgres with no code change. Zero reviewer setup | Required Postgres (reviewer friction); in-memory (leaves a JD bullet untouched) |
+| D9 | Persistence | **LangGraph `SqliteSaver`** for conversation; SQLAlchemy for cache and traces | Conversation state is the framework's responsibility, which removes an entire class of bug (see §7.1). SQLAlchemy still backs the semantic cache and trace rows, `DATABASE_URL` still swaps to Postgres. | A hand-written turns table (what round 1 had, and what silently broke) |
 
-### On not using LangGraph
+### 7.1 Why LangGraph, and what changed
 
-> This flow is a single loop with one branch. LangGraph's state-graph machinery would add a
-> dependency and a layer of indirection without removing code we would otherwise write.
-> Where it *would* earn its place: human-in-the-loop interrupts, checkpointed long-running
-> workflows, branching multi-agent handoff. The tool registry is framework-agnostic, so the
-> tools port to LangGraph unchanged if the flow later becomes branchy.
+Round 1 of this project used a raw function-calling loop. That is now replaced.
+
+**The engineering reason.** The orchestration had grown four concerns tangled in one
+method: message assembly, tool dispatch, citation validation and persistence. As a
+graph they are four nodes with explicit edges between them, each independently
+testable. `tools_condition` — LangGraph's built-in router — turns "which tools does
+this query need" from a branch inside a method into an edge in the workflow.
+
+**The concrete win.** Round 1 had a bug where conversation history was *read* but never
+*written*, so multi-turn was inert across the whole project while every single-turn test
+passed. With a checkpointer that bug is structurally impossible: persistence is the
+framework's responsibility, not a call the agent must remember to make.
+
+**Measured, not asserted.** The same eval suite ran against both implementations:
+
+| Metric | Custom loop | LangGraph |
+|---|---|---|
+| Tool-selection accuracy | 90.0% | **90.0%** |
+| Citation validity | 100% | **100%** |
+| Refusal accuracy | 93.3% | **93.3%** |
+| Overall pass rate | 83.3% | **83.3%** |
+| Simulated conversations | 3/3 | **3/3** |
+| p50 / p95 latency | 1457 / 3247 ms | 2006 / 7971 ms |
+| RAGAS faithfulness | 0.707 | 0.676 |
+
+Every deterministic metric is identical, which is the evidence that the port preserved
+behaviour rather than merely compiling. Two honest costs: **latency rose roughly 40%**
+(graph overhead plus checkpointer writes on every turn), and RAGAS moved within the
+run-to-run variance documented in §8 — those metrics have swung 0.589–0.748 across runs
+of the same code.
+
+**What porting cost.** The tool registry was built framework-agnostic in round 1, so
+`registry.py`, both tool modules, the RAG stack and the eval harness are untouched. A
+25-line adapter turns registry `ToolSpec`s into LangChain `StructuredTool`s. The churn
+landed almost entirely in tests: 44 failures across 5 files, because every test
+constructing an `Agent` or scripting a raw `LLMResponse` had to move to the graph.
+
+**Four bugs surfaced during the port**, each worth naming:
+
+1. `store_cache` never cached an answer that used a tool — its "first turn" heuristic
+   counted messages, and a tool round inflates that count. Both nodes now share one
+   explicit flag rather than each guessing.
+2. Unparseable tool results were silently dropped from the trace. `ToolNode` emits plain
+   text when the model names a tool that does not exist; that is a real error.
+3. `TOOL_CALL` events carrying the arguments were lost. A visible reasoning trace is a
+   product requirement, so the agent node records them.
+4. A test stub embedder hashed with `% 997` and collided across queries, turning a cache
+   miss into a false hit — the test was asserting the opposite of its intent.
 
 ## 8. Evaluation
 
@@ -689,10 +759,10 @@ calls entirely, which would make tool selection unmeasurable.
 | | Citation validity | **100%** |
 | | Refusal accuracy | **93.3%** |
 | | Overall pass rate | **83.3%** |
-| | p50 / p95 latency | 1984 / 6323 ms |
-| **RAGAS** | Faithfulness | **0.707** |
-| | Answer relevancy | **0.938** |
-| | Context precision (reference-free) | **0.949** |
+| | p50 / p95 latency | 2006 / 7971 ms |
+| **RAGAS** | Faithfulness | **0.676** |
+| | Answer relevancy | **0.860** |
+| | Context precision (reference-free) | **0.863** |
 | **Simulation** | Goal completion | **100%** (3/3) |
 | | Context retention | **kept** (3/3) |
 
