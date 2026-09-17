@@ -21,7 +21,15 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "pytest-cov>=5.0", "respx>=0.21"]
-evals = ["ragas>=0.2", "datasets>=3.0"]
+# ragas 0.3.x and langchain-community 0.4.x break each other: ragas imports
+# langchain_community.chat_models.vertexai, removed in 0.4. These are the versions
+# the eval numbers in the README were actually produced with.
+evals = [
+    "ragas>=0.2.15,<0.3",
+    "langchain-community>=0.3,<0.4",
+    "langchain-openai>=0.2",
+    "datasets>=3.0",
+]
 
 [project.scripts]
 tripmate = "tripmate.adapters.cli:main"
