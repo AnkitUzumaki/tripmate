@@ -152,11 +152,45 @@ drift apart.
 
 ## 5. Example runs
 
-This section will show five real interactions taken from `traces/`: single-tool RAG,
-single-tool weather, multi-tool packing, out-of-scope refusal, and the weather-fallback
-path with `FALLBACK_USED` visible in the trace.
+Five real interactions, captured with `LLM_MODEL=groq/openai/gpt-oss-120b`. Full
+event-by-event traces are committed as JSONL in `traces/`.
 
-> **Pending:** captured from live runs once an LLM provider is configured.
+| Trace file | Query | Tools called | Events |
+|---|---|---|---|
+| `example_single_tool_rag.jsonl` | Do I need a visa to visit Japan as a tourist? | `search_destination_guide` | 6 |
+| `example_single_tool_weather.jsonl` | How cold does Reykjavik get in January? | `get_weather_forecast` | 7 |
+| `example_multi_tool_packing.jsonl` | What should I pack for Tokyo in December? | **both tools** | 9 |
+| `example_out_of_scope.jsonl` | Can you book my flight to Barcelona? | none | 3 |
+| `example_weather_fallback.jsonl` | Packing query with the weather API unreachable | both, weather degraded | 9 |
+
+**Multi-tool (the case Module 4 grades).** The packing query calls both tools in one
+turn and cites the guide:
+
+```
+TOOL_CALL    search_destination_guide  {"query": "packing tips", "city": "tokyo"}
+TOOL_CALL    get_weather_forecast      {"city": "Tokyo", "date_or_month": "December"}
+TOOL_RESULT  search_destination_guide  status=ok
+TOOL_RESULT  get_weather_forecast      status=ok
+ANSWER       citations=[tokyo/PACKING TIPS, tokyo/SAFETY & HEALTH]
+```
+
+**Out of scope.** Three events, no tool calls, no fabricated action:
+
+> I'm sorry — I can't book, change, or pay for flights or any other reservations. I can,
+> however, help you with travel-related information such as visa requirements, the best
+> time to visit, local customs, packing tips and safety notes.
+
+**Failure path.** With `httpx` patched to raise a timeout, the weather tool falls back to
+its offline table rather than failing the turn. The degradation is visible in the trace,
+never silent:
+
+```
+TOOL_RESULT    get_weather_forecast  status=ok
+FALLBACK_USED  get_weather_forecast
+```
+
+The agent still answers, and the response carries `source: mock_fallback` so it can say
+the figures are approximate offline data rather than presenting them as live.
 
 ## 6. Design decisions
 
@@ -214,19 +248,56 @@ uv run python -m evals.run_evals --ragas --simulation
 
 Results:
 
+Measured on `groq/openai/gpt-oss-120b`, 30 deterministic cases and 3 simulated
+conversations. The semantic cache is disabled for eval runs — replaying a cached answer
+skips tool calls entirely, which makes tool selection unmeasurable.
+
 | Layer | Metric | Score |
 |---|---|---|
-| Deterministic | Tool-selection accuracy | pending |
-| Deterministic | Citation validity | pending |
-| Deterministic | Refusal accuracy | pending |
-| Deterministic | p50 / p95 latency | pending |
-| RAGAS | Faithfulness | pending |
-| RAGAS | Answer relevancy | pending |
-| RAGAS | Context precision | pending |
-| Simulation | Goal completion | pending |
-| Simulation | Context retention | pending |
+| Deterministic | Tool-selection accuracy | **86.7%** |
+| Deterministic | Citation validity | **100%** |
+| Deterministic | Refusal accuracy | **93.3%** |
+| Deterministic | Overall pass rate | **80.0%** |
+| Deterministic | p50 / p95 latency | 1146 ms / 4378 ms |
+| Simulation | Goal completion | **100%** (3/3) |
+| Simulation | Context retention | **kept** (3/3) |
+| RAGAS | faithfulness / relevancy / precision | not run — see below |
 
-> **Pending:** numbers from the live eval run.
+**What the remaining failures are.** Four of the 30 cases fail tool selection, and all
+four are the same disagreement: for a destination outside the four covered cities
+(`Paris`, `Atlantis`, `Seoul`) or a topic outside the guide's five sections (Tokyo metro
+ticket prices), the dataset expects the agent to call the tool and receive a `no_data`
+result, while the model instead declines to call it at all — the system prompt already
+names its coverage, so it answers the limitation directly. Both behaviours avoid
+fabrication, and the model's is cheaper by one tool call. The dataset expectation is
+arguably too prescriptive here; it is left unchanged rather than tuned to match observed
+behaviour, because rewriting an assertion to fit the model is how an eval stops
+measuring anything.
+
+**Two defects this harness found in itself.** Worth recording, because both would have
+silently understated the agent:
+
+1. Refusal detection matched the ASCII apostrophe in `can't`, but the model emits the
+   typographic `can’t` (U+2019). Every correct refusal scored as a failure. Fixed by
+   folding smart punctuation to ASCII before matching — refusal accuracy went 83.3% to
+   93.3%, with no change to the agent.
+2. Eval runs shared the semantic cache with manual runs, so repeated queries replayed a
+   cached answer in ~10 ms with zero tool calls and scored as routing failures. Fixed by
+   disabling the cache for eval runs — overall pass rate went 66.7% to 80.0%.
+
+**RAGAS is not in these numbers.** The installed `ragas` fails at import against the
+resolved `langchain-community`:
+
+```
+ModuleNotFoundError: No module named 'langchain_community.chat_models.vertexai'
+```
+
+This is an upstream version incompatibility, not a defect in `evals/ragas_eval.py`,
+which is complete and wired into `run_evals.py`. Pinning `ragas<0.3` reproduces the same
+error; pinning `langchain-community<0.3` trades it for a different one
+(`cannot import name 'ContextOverflowError'`). Resolving it needs a compatible triple of
+`ragas`, `langchain-core` and `langchain-community`, which is left as a known limitation
+rather than pinned by guesswork.
 
 ## 8. Testing
 

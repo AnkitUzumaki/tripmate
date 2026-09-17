@@ -122,9 +122,23 @@ def tools_called(response: AgentResponse) -> list[str]:
     ]
 
 
+SMART_PUNCTUATION = {"\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"'}
+
+
+def normalise(text: str) -> str:
+    """Fold typographic punctuation to ASCII before matching.
+
+    Models emit curly apostrophes, so "can\u2019t" never matched a "can't" phrase
+    and every correct refusal scored as a failure.
+    """
+    for fancy, plain in SMART_PUNCTUATION.items():
+        text = text.replace(fancy, plain)
+    return text
+
+
 def score_case(case: EvalCase, response: AgentResponse) -> CaseScore:
     called = tools_called(response)
-    answer_lower = (response.answer or "").lower()
+    answer_lower = normalise(response.answer or "").lower()
     cited = {citation.ref for citation in response.citations}
 
     mentions_ok = all(

@@ -11,6 +11,7 @@ from rich.table import Table
 
 from evals.deterministic import DeterministicReport, load_dataset, run_deterministic
 from tripmate.bootstrap import build_agent
+from tripmate.config import get_settings
 
 DATASET_PATH = Path(__file__).parent / "dataset.yaml"
 
@@ -57,7 +58,10 @@ def main() -> None:
     args = parser.parse_args()
 
     console = Console()
-    agent = build_agent()
+    # Cache off: replaying a cached answer skips tool calls entirely, which makes
+    # tool-selection unmeasurable and scores cache hits as routing failures.
+    settings = get_settings().model_copy(update={"semantic_cache_enabled": False})
+    agent = build_agent(settings)
     cases = load_dataset(DATASET_PATH)
     if args.limit:
         cases = cases[: args.limit]
