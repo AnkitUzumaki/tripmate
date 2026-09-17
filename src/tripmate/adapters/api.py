@@ -108,19 +108,30 @@ def create_app(
 
     @app.get("/sessions/{session_id}", response_model=SessionHistoryResponse)
     def get_session(session_id: str) -> SessionHistoryResponse:
-        """Retrieve the history of a session."""
-        # Fall back to the agent's own store: the module-level `app = create_app()`
-        # injects nothing, and build_agent() has already built a SessionStore. Without
-        # this the endpoint is permanently 404 in production while passing its tests.
-        store = _active_store or _ensure_agent().store
-        if store is None:
-            raise HTTPException(status_code=404, detail="Session store not configured")
+        """Conversation history for a session.
 
-        history = store.history(session_id)
-        if not history:
+        Read from LangGraph's checkpointer rather than a separate turns table: the
+        checkpointer is what actually owns conversation state, so anything else would
+        be a second copy that could disagree with the one the agent uses.
+        """
+        graph = _ensure_agent().graph
+        config = {"configurable": {"thread_id": session_id}}
+        try:
+            snapshot = graph.get_state(config)
+        except Exception:
+            raise HTTPException(status_code=404,
+                                detail="Session store not configured")
+
+        messages = (snapshot.values or {}).get("messages", []) if snapshot else []
+        turns = [
+            {"role": m.type, "content": str(m.content)}
+            for m in messages
+            if m.type in ("human", "ai") and str(m.content).strip()
+        ]
+        if not turns:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        return SessionHistoryResponse(session_id=session_id, turns=history)
+        return SessionHistoryResponse(session_id=session_id, turns=turns)
 
     return app
 

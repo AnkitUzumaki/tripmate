@@ -19,6 +19,17 @@ PROVIDER_ENV_VARS: dict[str, str] = {
 
 KEYLESS_PROVIDERS: frozenset[str] = frozenset({"ollama", "ollama_chat"})
 
+# Base URLs for providers that expose an OpenAI-compatible endpoint. LangChain's
+# ChatOpenAI (used by the graph, and by the RAGAS judge) talks to all of them through
+# this one client, which is what keeps provider independence on the LangGraph path.
+PROVIDER_OPENAI_COMPATIBLE_URLS: dict[str, str | None] = {
+    "openai": None,  # the default; ChatOpenAI needs no base_url override
+    "groq": "https://api.groq.com/openai/v1",
+    "together_ai": "https://api.together.xyz/v1",
+    "mistral": "https://api.mistral.ai/v1",
+    "ollama": "http://localhost:11434/v1",
+}
+
 DEFAULT_PROVIDER = "openai"
 
 

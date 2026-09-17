@@ -6,10 +6,11 @@ timeout, out-of-scope request, malformed or empty input.
 
 import httpx
 import pytest
+
+from tests.fakes import ai
 import respx
 
 from tripmate.core.trace import EventType
-from tripmate.models import LLMResponse, ToolCall
 from tripmate.tools.weather import GEOCODE_URL
 
 
@@ -17,10 +18,8 @@ from tripmate.tools.weather import GEOCODE_URL
 
 def test_unknown_destination_returns_no_data_and_names_supported_cities(build_test_agent):
     agent, _ = build_test_agent([
-        LLMResponse(tool_calls=[ToolCall(
-            id="1", name="search_destination_guide",
-            arguments={"query": "visa requirements", "city": "paris"})]),
-        LLMResponse(content="I don't have a guide for Paris. I cover Tokyo, "
+        ai(tool_calls=[{"name": "search_destination_guide", "args": {"query": "visa requirements", "city": "paris"}, "id": "1"}]),
+        ai("I don't have a guide for Paris. I cover Tokyo, "
                             "Reykjavik, Bangkok and Barcelona."),
     ])
     response = agent.chat("what are the visa rules for Paris?")
@@ -33,10 +32,8 @@ def test_unknown_destination_returns_no_data_and_names_supported_cities(build_te
 
 def test_unknown_destination_answer_carries_no_citations(build_test_agent):
     agent, _ = build_test_agent([
-        LLMResponse(tool_calls=[ToolCall(
-            id="1", name="search_destination_guide",
-            arguments={"query": "visa", "city": "paris"})]),
-        LLMResponse(content="No guide for Paris."),
+        ai(tool_calls=[{"name": "search_destination_guide", "args": {"query": "visa", "city": "paris"}, "id": "1"}]),
+        ai("No guide for Paris."),
     ])
     assert agent.chat("visa rules for Paris?").citations == []
 
@@ -48,10 +45,8 @@ def test_unresolvable_city_returns_no_data_from_the_weather_tool(build_test_agen
     respx.get(GEOCODE_URL).mock(return_value=httpx.Response(200, json={"results": []}))
 
     agent, _ = build_test_agent([
-        LLMResponse(tool_calls=[ToolCall(
-            id="1", name="get_weather_forecast",
-            arguments={"city": "Atlantis", "date_or_month": "July"})]),
-        LLMResponse(content="I couldn't find weather data for Atlantis."),
+        ai(tool_calls=[{"name": "get_weather_forecast", "args": {"city": "Atlantis", "date_or_month": "July"}, "id": "1"}]),
+        ai("I couldn't find weather data for Atlantis."),
     ])
     response = agent.chat("weather in Atlantis in July?")
 
@@ -62,10 +57,8 @@ def test_unresolvable_city_returns_no_data_from_the_weather_tool(build_test_agen
 
 def test_unparseable_timeframe_returns_no_data(build_test_agent):
     agent, _ = build_test_agent([
-        LLMResponse(tool_calls=[ToolCall(
-            id="1", name="get_weather_forecast",
-            arguments={"city": "Tokyo", "date_or_month": "whenever"})]),
-        LLMResponse(content="Could you tell me which month you mean?"),
+        ai(tool_calls=[{"name": "get_weather_forecast", "args": {"city": "Tokyo", "date_or_month": "whenever"}, "id": "1"}]),
+        ai("Could you tell me which month you mean?"),
     ])
     response = agent.chat("weather in Tokyo whenever?")
 
@@ -78,7 +71,7 @@ def test_unparseable_timeframe_returns_no_data(build_test_agent):
 
 def test_ambiguous_query_asks_for_clarification_without_calling_tools(build_test_agent):
     agent, _ = build_test_agent([
-        LLMResponse(content="Which destination did you have in mind — Tokyo, "
+        ai("Which destination did you have in mind — Tokyo, "
                             "Reykjavik, Bangkok or Barcelona?")
     ])
     response = agent.chat("what should I pack?")
@@ -94,10 +87,8 @@ def test_weather_api_timeout_falls_back_and_records_the_fallback(build_test_agen
     respx.get(GEOCODE_URL).mock(side_effect=httpx.TimeoutException("timed out"))
 
     agent, _ = build_test_agent([
-        LLMResponse(tool_calls=[ToolCall(
-            id="1", name="get_weather_forecast",
-            arguments={"city": "Tokyo", "date_or_month": "December"})]),
-        LLMResponse(content="The live weather service was unavailable; typical "
+        ai(tool_calls=[{"name": "get_weather_forecast", "args": {"city": "Tokyo", "date_or_month": "December"}, "id": "1"}]),
+        ai("The live weather service was unavailable; typical "
                             "December conditions in Tokyo are cold and dry."),
     ])
     response = agent.chat("weather in Tokyo in December?")
@@ -110,10 +101,8 @@ def test_weather_failure_without_offline_data_surfaces_a_tool_error(build_test_a
     respx.get(GEOCODE_URL).mock(side_effect=httpx.TimeoutException("timed out"))
 
     agent, _ = build_test_agent([
-        LLMResponse(tool_calls=[ToolCall(
-            id="1", name="get_weather_forecast",
-            arguments={"city": "Lisbon", "date_or_month": "December"})]),
-        LLMResponse(content="I couldn't reach the weather service for Lisbon."),
+        ai(tool_calls=[{"name": "get_weather_forecast", "args": {"city": "Lisbon", "date_or_month": "December"}, "id": "1"}]),
+        ai("I couldn't reach the weather service for Lisbon."),
     ])
     response = agent.chat("weather in Lisbon in December?")
 
@@ -122,9 +111,8 @@ def test_weather_failure_without_offline_data_surfaces_a_tool_error(build_test_a
 
 def test_unknown_tool_name_from_the_model_becomes_a_tool_error(build_test_agent):
     agent, _ = build_test_agent([
-        LLMResponse(tool_calls=[ToolCall(id="1", name="book_flight",
-                                         arguments={"to": "Tokyo"})]),
-        LLMResponse(content="I can't book flights."),
+        ai(tool_calls=[{"name": "book_flight", "args": {"to": "Tokyo"}, "id": "1"}]),
+        ai("I can't book flights."),
     ])
     response = agent.chat("book me a flight")
 
@@ -135,7 +123,7 @@ def test_unknown_tool_name_from_the_model_becomes_a_tool_error(build_test_agent)
 
 def test_booking_request_is_refused_without_calling_tools(build_test_agent):
     agent, _ = build_test_agent([
-        LLMResponse(content="I can't book flights. I can tell you about visas, "
+        ai("I can't book flights. I can tell you about visas, "
                             "weather, packing, customs and safety for four cities.")
     ])
     response = agent.chat("can you book my flight to Barcelona?")
@@ -146,7 +134,7 @@ def test_booking_request_is_refused_without_calling_tools(build_test_agent):
 
 def test_unrelated_topic_is_declined_without_calling_tools(build_test_agent):
     agent, _ = build_test_agent([
-        LLMResponse(content="That's outside what I cover. I help with travel "
+        ai("That's outside what I cover. I help with travel "
                             "questions for four destinations.")
     ])
     response = agent.chat("write me a python script to sort a list")

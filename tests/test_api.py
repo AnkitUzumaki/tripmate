@@ -5,12 +5,11 @@ from fastapi.testclient import TestClient
 
 from tripmate.adapters.api import create_app
 from tripmate.core.agent import Agent
-from tripmate.models import LLMResponse, ToolCall
 from tripmate.tools.registry import ToolRegistry, tool
 from tripmate.models import ToolResult
 from typing import Annotated
 
-from tests.fakes import FakeLLMClient
+from tests.fakes import FakeChatModel, ai
 
 
 @tool
@@ -23,9 +22,21 @@ def stub_guide(query: Annotated[str, "topic"]) -> ToolResult:
 
 
 def _client(script) -> TestClient:
+    """App wired to a real graph with a scripted model and one stub tool."""
+    from tripmate.core.agent import Agent
+    from tripmate.graph.builder import bind_model, build_graph
+
     registry = ToolRegistry()
     registry.register(stub_guide)
-    agent = Agent(llm=FakeLLMClient(script), registry=registry)
+    fake = FakeChatModel(script)
+    holder: dict = {}
+    graph = build_graph(
+        model=bind_model(fake, registry),
+        registry=registry,
+        tracer_of=lambda: holder["agent"].current_tracer(),
+    )
+    agent = Agent(graph=graph, registry=registry)
+    holder["agent"] = agent
     return TestClient(create_app(agent=agent))
 
 
@@ -41,7 +52,7 @@ def test_health_reports_the_registered_tools():
 
 
 def test_chat_returns_the_answer():
-    client = _client([LLMResponse(content="Hello from TripMate.")])
+    client = _client([ai("Hello from TripMate.")])
     body = client.post("/chat", json={"query": "hello"}).json()
 
     assert body["answer"] == "Hello from TripMate."
@@ -49,9 +60,8 @@ def test_chat_returns_the_answer():
 
 def test_chat_returns_citations_and_trace():
     client = _client([
-        LLMResponse(tool_calls=[ToolCall(id="1", name="stub_guide",
-                                         arguments={"query": "visa"})]),
-        LLMResponse(content="Visa-free [tokyo/VISA & ENTRY]."),
+        ai(tool_calls=[{"name": "stub_guide", "args": {"query": "visa"}, "id": "1"}]),
+        ai("Visa-free [tokyo/VISA & ENTRY]."),
     ])
     body = client.post("/chat", json={"query": "visa for Japan?"}).json()
 
@@ -60,15 +70,14 @@ def test_chat_returns_citations_and_trace():
 
 
 def test_chat_echoes_the_session_id():
-    client = _client([LLMResponse(content="hi")])
+    client = _client([ai("hi")])
     body = client.post("/chat", json={"query": "hi", "session_id": "abc123"}).json()
 
     assert body["session_id"] == "abc123"
 
 
 def test_chat_reports_cost_and_latency():
-    client = _client([LLMResponse(content="hi", prompt_tokens=10,
-                                  completion_tokens=2, cost_usd=0.0001)])
+    client = _client([ai("hi", prompt_tokens=10, completion_tokens=2)])
     body = client.post("/chat", json={"query": "hi"}).json()
 
     assert body["prompt_tokens"] == 10

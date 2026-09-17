@@ -12,7 +12,6 @@ from tripmate.core.agent import Agent
 from tripmate.core.cache import SemanticCache
 from tripmate.core.trace import EventType, Tracer
 from tripmate.db import Database, SessionStore
-from tripmate.models import LLMResponse, ToolCall
 from tripmate.rag.chunker import load_all
 from tripmate.rag.store import ChromaStore
 from tripmate.tools.destination import reset_store, search_destination_guide, set_store
@@ -20,7 +19,7 @@ from tripmate.tools.registry import ToolRegistry
 from tripmate.tools.weather import ARCHIVE_URL, GEOCODE_URL, clear_cache
 from tripmate.tools.weather import get_weather_forecast
 
-from tests.fakes import FakeLLMClient
+from tests.fakes import FakeChatModel, ai
 
 GEOCODE_TOKYO = {"results": [{"latitude": 35.68, "longitude": 139.75, "name": "Tokyo"}]}
 ARCHIVE_DECEMBER = {
@@ -33,21 +32,14 @@ ARCHIVE_DECEMBER = {
 }
 
 PACKING_SCRIPT = [
-    LLMResponse(
-        tool_calls=[
-            ToolCall(id="1", name="search_destination_guide",
-                     arguments={"query": "packing tips", "city": "tokyo"}),
-            ToolCall(id="2", name="get_weather_forecast",
-                     arguments={"city": "Tokyo", "date_or_month": "December"}),
-        ],
-        prompt_tokens=400, completion_tokens=60, cost_usd=0.0008,
-    ),
-    LLMResponse(
-        content="Pack warm layers and comfortable walking shoes "
+    ai(tool_calls=[
+            {"name": "search_destination_guide", "args": {"query": "packing tips", "city": "tokyo"}, "id": "1"},
+            {"name": "get_weather_forecast", "args": {"city": "Tokyo", "date_or_month": "December"}, "id": "2"},
+        ], prompt_tokens=400, completion_tokens=60),
+    ai("Pack warm layers and comfortable walking shoes "
                 "[tokyo/PACKING TIPS]. December in Tokyo is typically cold and "
                 "mostly dry, roughly 3 to 12 C.",
-        prompt_tokens=900, completion_tokens=80, cost_usd=0.0015,
-    ),
+       prompt_tokens=900, completion_tokens=80),
 ]
 
 
@@ -75,15 +67,33 @@ def agent(tmp_path):
     registry.register(search_destination_guide)
     registry.register(get_weather_forecast)
 
-    # Build the agent with real cache and tracer
+    # Build over a REAL compiled graph with a real checkpointer — only the model is
+    # scripted. Everything else in this test is the production object.
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    import sqlite3
+
+    from tripmate.graph.builder import bind_model, build_graph
+
+    cache = SemanticCache(db=db, embedder=store.embedder, threshold=0.95)
+    fake = FakeChatModel(PACKING_SCRIPT)
+    holder: dict = {}
+    graph = build_graph(
+        model=bind_model(fake, registry),
+        registry=registry,
+        tracer_of=lambda: holder["agent"].current_tracer(),
+        cache=cache,
+        checkpointer=SqliteSaver(
+            sqlite3.connect(str(tmp_path / "graph.db"), check_same_thread=False)
+        ),
+    )
     built = Agent(
-        llm=FakeLLMClient(PACKING_SCRIPT),
+        graph=graph,
         registry=registry,
         tracer_factory=lambda sid: Tracer(session_id=sid,
                                           trace_dir=str(tmp_path / "traces")),
-        store=SessionStore(db),
-        cache=SemanticCache(db=db, embedder=store.embedder, threshold=0.95),
     )
+    holder["agent"] = built
+
     yield built
     reset_store()
     clear_cache()
@@ -123,7 +133,11 @@ def test_cost_and_tokens_accumulate_across_both_llm_calls(agent):
     response = agent.chat("What should I pack for Tokyo in December?")
 
     assert response.prompt_tokens == 1300
-    assert response.cost_usd == pytest.approx(0.0023)
+    assert response.completion_tokens == 140
+    # Cost is derived from the price map rather than injected by the fake, so a
+    # nameless test model is legitimately free. _estimate_cost is tested directly
+    # in tests/test_graph_nodes.py against a priced model.
+    assert response.cost_usd == 0.0
 
 
 @respx.mock

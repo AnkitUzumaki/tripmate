@@ -15,13 +15,6 @@ from evals.deterministic import EvalCase
 from tripmate.core.trace import EventType
 from tripmate.models import AgentResponse
 
-PROVIDER_OPENAI_COMPATIBLE_URLS = {
-    "groq": "https://api.groq.com/openai/v1",
-    "openai": None,  # the default; ChatOpenAI needs no base_url override
-    "together_ai": "https://api.together.xyz/v1",
-    "mistral": "https://api.mistral.ai/v1",
-}
-
 METRIC_NAMES = (
     "faithfulness",
     "answer_relevancy",
@@ -52,7 +45,7 @@ def _judge_llm():
     from langchain_openai import ChatOpenAI
     from ragas.llms import LangchainLLMWrapper
 
-    from tripmate.config import get_settings
+    from tripmate.config import PROVIDER_OPENAI_COMPATIBLE_URLS, get_settings
 
     settings = get_settings()
     settings.export_provider_key()
@@ -79,7 +72,7 @@ def _judge_embeddings():
     from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
     from ragas.embeddings import LangchainEmbeddingsWrapper
 
-    from tripmate.config import get_settings
+    from tripmate.config import PROVIDER_OPENAI_COMPATIBLE_URLS, get_settings
 
     return LangchainEmbeddingsWrapper(
         FastEmbedEmbeddings(model_name=get_settings().embedding_model)

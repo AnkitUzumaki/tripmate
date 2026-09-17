@@ -15,7 +15,8 @@ import pytest
 
 from tripmate.core.agent import Agent
 from tripmate.core.trace import EventType
-from tripmate.models import AgentResponse, LLMResponse
+from tripmate.graph.builder import bind_model, build_graph
+from tripmate.models import AgentResponse
 from tripmate.rag.chunker import load_all
 from tripmate.rag.store import ChromaStore
 from tripmate.tools.destination import (
@@ -24,7 +25,9 @@ from tripmate.tools.destination import (
 from tripmate.tools.registry import ToolRegistry
 from tripmate.tools.weather import clear_cache, get_weather_forecast
 
-from tests.fakes import FakeLLMClient
+from langchain_core.messages import AIMessage
+
+from tests.fakes import FakeChatModel
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -46,23 +49,48 @@ def _real_store(tmp_path_factory):
     clear_cache()
 
 
-@pytest.fixture
-def build_test_agent() -> Callable[[list[LLMResponse]], tuple[Agent, FakeLLMClient]]:
-    """Factory fixture that builds a test agent with real tools and a scripted model.
+@pytest.fixture(autouse=True)
+def _isolate_weather_cache():
+    """Clear the weather disk cache between tests.
 
-    Each test receives the factory and calls it with an LLMResponse script:
-        agent, fake = build_test_agent([LLMResponse(...), ...])
+    Climate normals cache permanently by design, so without this a test that populates
+    Tokyo/December makes a later timeout test unable to time out — there is nothing left
+    to call. Function-scoped because the pollution crosses files.
+    """
+    clear_cache()
+    yield
+    clear_cache()
+
+
+@pytest.fixture
+def build_test_agent() -> Callable[[list[AIMessage]], tuple[Agent, FakeChatModel]]:
+    """Build an agent over a REAL compiled graph with a scripted model.
+
+    Only the model is fake: the graph, its nodes, its edges, ToolNode and both real
+    tools all execute. That is what makes these tests meaningful rather than mocks
+    asserting on mocks.
+
+        agent, fake = build_test_agent([ai(tool_calls=[...]), ai("answer")])
         response = agent.chat("query")
 
-    The agent wires both real tools (search_destination_guide and get_weather_forecast)
-    onto a fresh registry, so tool execution is real while the LLM responses are scripted.
+    No checkpointer: each test gets a fresh single-turn graph, so tests cannot leak
+    conversation state into one another. Multi-turn tests build their own.
     """
-    def _build(script: list[LLMResponse]) -> tuple[Agent, FakeLLMClient]:
+    def _build(script: list[AIMessage]) -> tuple[Agent, FakeChatModel]:
         registry = ToolRegistry()
         registry.register(search_destination_guide)
         registry.register(get_weather_forecast)
-        fake = FakeLLMClient(script)
-        return Agent(llm=fake, registry=registry), fake
+
+        fake = FakeChatModel(script)
+        holder: dict[str, Agent] = {}
+        graph = build_graph(
+            model=bind_model(fake, registry),
+            registry=registry,
+            tracer_of=lambda: holder["agent"].current_tracer(),
+        )
+        agent = Agent(graph=graph, registry=registry)
+        holder["agent"] = agent
+        return agent, fake
     return _build
 
 
@@ -75,6 +103,20 @@ def tools_called() -> Callable[[AgentResponse], list[str]]:
         names = tools_called(response)  # e.g. ["search_destination_guide"]
     """
     def _extract(response: AgentResponse) -> list[str]:
-        return [e.payload["tool"] for e in response.trace
-                if e.event_type == EventType.TOOL_CALL]
+        # The graph's ToolNode executes tools; what the model *chose* is recorded on
+        # the LLM_CALL event, and what actually ran on TOOL_RESULT. Report the union,
+        # in first-seen order, so assertions read the same as before the port.
+        names: list[str] = []
+        for event in response.trace:
+            if event.event_type == EventType.LLM_CALL:
+                names.extend(event.payload.get("requested_tools") or [])
+            elif event.event_type in (EventType.TOOL_RESULT, EventType.TOOL_ERROR):
+                tool = event.payload.get("tool")
+                if tool:
+                    names.append(tool)
+        seen: list[str] = []
+        for n in names:
+            if n not in seen:
+                seen.append(n)
+        return seen
     return _extract

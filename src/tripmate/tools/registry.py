@@ -89,6 +89,14 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return list(self._specs)
 
+    def specs(self) -> list[ToolSpec]:
+        """Every registered spec, in registration order.
+
+        Public because adapters to other frameworks need the arg_model and callable,
+        not just the JSON schema `schemas()` returns.
+        """
+        return list(self._specs.values())
+
     def schemas(self) -> list[dict[str, Any]]:
         """Every tool schema, in registration order.
 
