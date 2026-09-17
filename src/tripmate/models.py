@@ -7,7 +7,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-CITATION_RE = re.compile(r"\[([A-Za-z\s\-']+)/([A-Za-z\s&'\-]+)\]")
+# Matches [city/SECTION] and the variants models actually emit: leading/trailing
+# spaces inside the brackets, CJK brackets, and underscored pseudo-sections such as
+# [Tokyo/climate_normal]. Parsing them is what lets validate_citations strip the ones
+# that do not correspond to a retrieved chunk, instead of leaving them in the answer.
+CITATION_RE = re.compile(
+    r"[\[【]\s*([\w\s\-']+?)\s*/\s*([\w\s&'\-]+?)\s*[\]】]"
+)
 
 ToolStatus = Literal["ok", "no_data", "error"]
 WeatherSource = Literal["forecast", "climate_normal", "mock_fallback"]

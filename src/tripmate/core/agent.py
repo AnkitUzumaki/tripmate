@@ -58,6 +58,9 @@ def validate_query(query: str, max_chars: int) -> str:
     return cleaned
 
 
+DANGLING_LEAD_IN_RE = re.compile(r"\s*(?:Sources?|Refs?|References?)\s*:\s*(?=$|\n)", re.I)
+
+
 def extract_citations(answer: str) -> list[Citation]:
     return [
         Citation(city=match.group(1).strip().lower(),
@@ -97,6 +100,8 @@ def validate_citations(
         return ""
 
     cleaned = CITATION_RE.sub(_replace, answer or "")
+    # A stripped citation can orphan the phrase that introduced it ("... Source:").
+    cleaned = DANGLING_LEAD_IN_RE.sub("", cleaned)
     return " ".join(cleaned.split()), kept, rejected
 
 
@@ -147,7 +152,12 @@ class Agent:
         tracer.record(EventType.QUERY_RECEIVED, query=cleaned,
                       prompt_version=PROMPT_VERSION)
 
-        cached = self._cache.lookup(cleaned) if self._cache else None
+        # The cache keys on query text alone, so "What should I pack?" asked after
+        # "I'm going to Tokyo in December" replays the context-free answer cached under
+        # the same words. A follow-up is not a standalone question: consult and populate
+        # the cache only on the first turn of a session.
+        is_first_turn = not (self._store and self._store.history(session_id))
+        cached = self._cache.lookup(cleaned) if (self._cache and is_first_turn) else None
         if cached is not None:
             tracer.record(EventType.CACHE_HIT, similarity=round(cached.similarity, 4))
             response = self._finish(cached.answer, cached.citations, tracer, session_id,
@@ -155,7 +165,7 @@ class Agent:
         else:
             answer, citations = self._run_loop(cleaned, session_id, tracer)
 
-            if self._cache:
+            if self._cache and is_first_turn:
                 self._cache.store(cleaned, answer, citations)
 
             response = self._finish(answer, citations, tracer, session_id, started)

@@ -1,6 +1,7 @@
 """Versioned system prompt. Kept out of the loop so it can be diffed and evaluated."""
 
-PROMPT_VERSION = "2026-09-16.1"
+import hashlib
+
 
 SYSTEM_PROMPT = """You are TripMate, a travel assistant.
 
@@ -24,6 +25,8 @@ GROUNDING
   plainly and name what you do cover.
 - Cite every claim drawn from the destination guide as [city/SECTION], exactly as the
   tool result's `ref` field gives it, for example [tokyo/PACKING TIPS].
+- Cite ONLY destination-guide content. Weather data is not from the guide, so never
+  attach a bracketed citation to it - no [city/climate_normal], no [climate_normal].
 - When weather data comes back with source "climate_normal", describe it as typical
   conditions for that time of year, not as a forecast. When source is "mock_fallback",
   say the live weather service was unavailable and this is approximate offline data.
@@ -42,3 +45,17 @@ AMBIGUITY
 STYLE
 - Be concise and concrete. Prefer short paragraphs or bullets over long prose.
 """
+
+
+def _content_version(text: str) -> str:
+    """Content hash of the prompt, used as its version.
+
+    A hand-maintained version string goes stale the first time someone edits the
+    prompt and forgets to bump it, and from then on every trace claims an answer came
+    from a prompt that no longer exists. Deriving it from the text makes that
+    impossible: change the prompt, the version changes with it.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+PROMPT_VERSION = _content_version(SYSTEM_PROMPT)

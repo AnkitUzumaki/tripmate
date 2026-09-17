@@ -280,3 +280,113 @@ def test_tool_call_ids_stay_matched_to_their_own_result_under_concurrency():
     for message in tool_messages:
         content = json.loads(message["content"])
         assert message["tool_call_id"] == expected_id_by_tool[content["tool_name"]]
+
+
+# --- regressions found by manual multi-turn testing (2026-09-17) ---
+
+
+def _store_backed_agent(tmp_path, script, cache):
+    from tripmate.db import Database, SessionStore
+
+    db = Database(url=f"sqlite:///{tmp_path}/regress.db")
+    db.create_all()
+    return Agent(
+        llm=FakeLLMClient(script),
+        registry=_registry(),
+        store=SessionStore(db),
+        cache=cache,
+    ), SessionStore(db)
+
+
+class _StubEmbedder:
+    """Identical text embeds identically, so cache similarity is exactly 1.0."""
+
+    def embed(self, texts):
+        return [[float(sum(ord(c) for c in t.strip().lower()) % 997), 1.0] for t in texts]
+
+
+def test_follow_up_does_not_replay_a_standalone_cached_answer(tmp_path):
+    """The cache keys on query text alone.
+
+    Without gating, "What should I pack?" asked after a turn establishing the
+    destination replays the context-free answer cached for the same words.
+    """
+    from tripmate.core.cache import SemanticCache
+    from tripmate.db import Database
+
+    db = Database(url=f"sqlite:///{tmp_path}/c.db")
+    db.create_all()
+    cache = SemanticCache(db=db, embedder=_StubEmbedder(), threshold=0.95)
+
+    from tripmate.db import SessionStore
+
+    store = SessionStore(db)
+    standalone = Agent(llm=FakeLLMClient([LLMResponse(content="Which destination?")]),
+                       registry=_registry(), store=store, cache=cache)
+    standalone.chat("What should I pack?", session_id="alone")
+
+    ctx = Agent(llm=FakeLLMClient([LLMResponse(content="Noted, Tokyo in December.")]),
+                registry=_registry(), store=store, cache=cache)
+    ctx.chat("I am going to Tokyo in December.", session_id="ctx")
+
+    fake = FakeLLMClient([LLMResponse(content="Pack warm layers for Tokyo.")])
+    response = Agent(llm=fake, registry=_registry(), store=store,
+                     cache=cache).chat("What should I pack?", session_id="ctx")
+
+    assert not any(e.event_type == EventType.CACHE_HIT for e in response.trace)
+    assert fake.calls, "follow-up must reach the model, not the cache"
+    assert response.answer == "Pack warm layers for Tokyo."
+
+
+def test_first_turn_repeat_still_hits_the_cache(tmp_path):
+    """Gating must not disable the cache for genuinely standalone repeats."""
+    from tripmate.core.cache import SemanticCache
+    from tripmate.db import Database, SessionStore
+
+    db = Database(url=f"sqlite:///{tmp_path}/c2.db")
+    db.create_all()
+    cache = SemanticCache(db=db, embedder=_StubEmbedder(), threshold=0.95)
+    store = SessionStore(db)
+
+    Agent(llm=FakeLLMClient([LLMResponse(content="Visa-free for 90 days.")]),
+          registry=_registry(), store=store,
+          cache=cache).chat("Do I need a visa?", session_id="one")
+
+    fake = FakeLLMClient([])  # exhausted: a hit is the only way this succeeds
+    response = Agent(llm=fake, registry=_registry(), store=store,
+                     cache=cache).chat("Do I need a visa?", session_id="two")
+
+    assert any(e.event_type == EventType.CACHE_HIT for e in response.trace)
+    assert fake.calls == []
+
+
+def test_stripping_a_citation_removes_the_phrase_that_introduced_it():
+    answer = "Barcelona is mild. Source: [paris/BEST TIME TO VISIT]"
+    cleaned, kept, rejected = validate_citations(
+        answer, extract_citations(answer), {"barcelona/BEST TIME TO VISIT"}
+    )
+    assert cleaned == "Barcelona is mild."
+    assert rejected == ["paris/BEST TIME TO VISIT"]
+    assert kept == []
+
+
+def test_invented_citation_markers_are_stripped_not_left_in_the_answer():
+    """Models emit CJK brackets and pseudo-sections like [Tokyo/climate_normal]."""
+    for answer in (
+        "Cold in January 【reykjavik/climate_normal】.",
+        "Layers [Tokyo/climate_normal].",
+    ):
+        cleaned, kept, _ = validate_citations(
+            answer, extract_citations(answer), {"tokyo/PACKING TIPS"}
+        )
+        assert "[" not in cleaned and "【" not in cleaned
+        assert kept == []
+
+
+def test_a_valid_citation_survives_alongside_an_invented_one():
+    answer = "Layers [Tokyo/climate_normal] and shoes [ tokyo/PACKING TIPS ]."
+    cleaned, kept, _ = validate_citations(
+        answer, extract_citations(answer), {"tokyo/PACKING TIPS"}
+    )
+    assert [c.ref for c in kept] == ["tokyo/PACKING TIPS"]
+    assert "climate_normal" not in cleaned

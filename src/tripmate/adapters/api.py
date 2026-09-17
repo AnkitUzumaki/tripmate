@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from importlib.metadata import version
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
@@ -15,6 +17,10 @@ from tripmate.bootstrap import build_agent
 from tripmate.config import Settings
 from tripmate.core.agent import Agent
 from tripmate.db import SessionStore
+
+# Single source of truth is pyproject's [project].version; a literal here would let the
+# documented API version drift from the package that is actually installed.
+API_VERSION = version("tripmate")
 from tripmate.models import AgentResponse
 
 
@@ -64,7 +70,7 @@ def create_app(
     _active_agent = agent
     _active_store = store
 
-    app = FastAPI(title="TripMate API")
+    app = FastAPI(title="TripMate API", version=API_VERSION)
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
