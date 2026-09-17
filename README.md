@@ -673,28 +673,40 @@ uv run python -m evals.run_evals --ragas --simulation
 
 Results:
 
-Measured on `groq/openai/gpt-oss-120b`, 30 deterministic cases and 3 simulated
-conversations. The semantic cache is disabled for eval runs — replaying a cached answer
-skips tool calls entirely, which makes tool selection unmeasurable.
+Measured on `groq/openai/gpt-oss-120b`: 30 deterministic cases, 12 RAG samples scored
+by RAGAS, 3 simulated conversations. Reproduce with
+`uv run python -m evals.run_evals --ragas --simulation`.
 
-Two independent runs are reported rather than one, because these metrics are
-stochastic — the same query can cite on one run and not the next. A single snapshot
-presented as definitive would overstate what the harness actually measures.
+The semantic cache is disabled for eval runs — replaying a cached answer skips tool
+calls entirely, which would make tool selection unmeasurable.
 
-| Layer | Metric | Run 1 | Run 2 |
-|---|---|---|---|
-| Deterministic | Tool-selection accuracy | 86.7% | 86.7% |
-| Deterministic | Citation validity | 100% | 96.7% |
-| Deterministic | Refusal accuracy | 93.3% | 93.3% |
-| Deterministic | Overall pass rate | 80.0% | 76.7% |
-| Deterministic | p50 / p95 latency | 1146 / 4378 ms | 2008 / 4987 ms |
-| Simulation | Goal completion | 100% (3/3) | — |
-| Simulation | Context retention | kept (3/3) | — |
-| RAGAS | faithfulness / relevancy / precision | not run — see below | |
+| Layer | Metric | Score |
+|---|---|---|
+| **Deterministic** | Tool-selection accuracy | **90.0%** |
+| | Citation validity | **96.7%** |
+| | Refusal accuracy | **93.3%** |
+| | Overall pass rate | **80.0%** |
+| | p50 / p95 latency | 2497 / 7781 ms |
+| **RAGAS** | Faithfulness | **0.589** |
+| | Answer relevancy | **0.850** |
+| | Context precision (reference-free) | **0.878** |
+| **Simulation** | Goal completion | **100%** (3/3) |
+| | Context retention | **kept** (3/3) |
 
-The single-point difference in citation validity is one case that cited on one run and
-not the other; re-running that case in isolation passes. Tool selection and refusal
-accuracy are stable across runs, which is the signal worth trusting here.
+**Reading the RAGAS numbers.** Answer relevancy (0.85) and context precision (0.88) are
+healthy: the agent retrieves the right chunks and answers the question asked.
+Faithfulness at **0.589** is the one to look at — it says roughly 40% of answer content
+is not directly traceable to a retrieved chunk. That is largely the model adding
+generic travel advice (power banks, travel adapters, first-aid kits) on top of the
+guide's content. It is not hallucinated *destination* fact — citation validity is 96.7%
+and the validator strips any citation not backed by a retrieval — but it is unsourced
+padding, and the honest read is that the prompt should push harder toward answering only
+from retrieved context. Faithfulness scored 0.748 on a 5-case subset and 0.589 across
+the full set, which is itself a reminder that small eval samples flatter.
+
+These metrics are stochastic. Across runs, tool selection and refusal accuracy are
+stable; citation validity moves by a single case, which passes when re-run in isolation.
+Those are the numbers worth trusting.
 
 **What the remaining failures are.** Four of the 30 cases fail tool selection, and all
 four are the same disagreement: for a destination outside the four covered cities
@@ -718,45 +730,26 @@ silently understated the agent:
    cached answer in ~10 ms with zero tool calls and scored as routing failures. Fixed by
    disabling the cache for eval runs — overall pass rate went 66.7% to 80.0%.
 
-**RAGAS is not in these numbers.** The installed `ragas` fails at import against the
-resolved `langchain-community`:
+**Getting RAGAS to run took four fixes**, each hiding the next — recorded because the
+failure modes are typical of this corner of the ecosystem:
 
-```
-ModuleNotFoundError: No module named 'langchain_community.chat_models.vertexai'
-```
+1. `ragas` imports `langchain_community.chat_models.vertexai`, removed in
+   langchain-community 0.4. The extra is pinned to `>=0.3,<0.4`, which still ships it.
+2. `context_precision` requires a `reference` (ground-truth answer) column this dataset
+   does not have. `LLMContextPrecisionWithoutReference` measures the same thing from the
+   question and retrieved contexts alone. Hand-authoring 30 reference answers is its own
+   project, and weak ones would score worse than no score at all.
+3. RAGAS defaults to OpenAI as its judge and raises without `OPENAI_API_KEY`. Rather
+   than require a second provider, its OpenAI-compatible client is pointed at whichever
+   provider the project is already configured for — so the same key that runs the agent
+   also grades it. Embeddings come from local `fastembed`, so no extra key is needed.
+4. `EvaluationResult` is not a mapping; `name in result` calls `__getitem__` with an
+   integer. Scores are taken as the mean over `to_pandas()` rows.
 
-This is an upstream version incompatibility, not a defect in `evals/ragas_eval.py`,
-which is complete and wired into `run_evals.py`. Pinning `ragas<0.3` reproduces the same
-error; pinning `langchain-community<0.3` trades it for a different one
-(`cannot import name 'ContextOverflowError'`). Resolving it needs a compatible triple of
-`ragas`, `langchain-core` and `langchain-community`, which is left as a known limitation
-rather than pinned by guesswork.
+The `evals` extra pins the exact combination these numbers were produced with, so
+`uv pip install -e ".[evals]"` reproduces them rather than resolving into the broken one.
 
-## 9. Testing
-
-```mermaid
-flowchart LR
-    subgraph Real["Real, not mocked"]
-        A["ChromaDB<br/>20 real chunks"]
-        B["SQLite database"]
-        C["Both tools"]
-        D["Trace files on disk"]
-    end
-    subgraph Fake["Scripted"]
-        E["FakeLLMClient<br/><i>identical signature<br/>to LLMClient</i>"]
-    end
-    Real --> T["194 tests<br/>no API key<br/>no network<br/>no flake"]
-    Fake --> T
-    style Fake fill:#7c3aed,stroke:#a78bfa,color:#fff
-    style T fill:#065f46,stroke:#10b981,color:#fff
-```
-
-Everything is real except the model. `FakeLLMClient` replays scripted responses and
-records every request; it satisfies the same `SupportsComplete` protocol as the real
-client, which is what lets the whole suite run in CI for free.
-
-| File | Covers |
-|---|---|
+---|---|
 | `test_config.py` | Settings validation, provider→env-var mapping |
 | `test_models.py` | Domain types, citation parsing |
 | `test_registry.py` | Schema derivation, arg validation, exception containment |
@@ -837,7 +830,13 @@ hierarchical routing: pick a tool *category* first, then a tool within it.
 - Multi-turn history is unbounded within a session; a long conversation would
   eventually need summarization or windowing.
 - Evaluation dataset is ~30 queries, hand-authored — enough to catch regressions, not
-  enough for statistical confidence.
+  enough for statistical confidence. Faithfulness scored 0.748 on a 5-case subset and
+  0.589 on the full set; small samples flatter.
+- **Faithfulness at 0.589** means roughly 40% of answer content is not traceable to a
+  retrieved chunk. It is generic travel advice rather than invented destination fact —
+  citation validity is 96.7% and unsupported citations are stripped — but the prompt
+  should push harder toward answering only from retrieved context. This is the clearest
+  measured weakness in the system.
 
 ## 12. Future improvements
 
