@@ -252,16 +252,24 @@ Measured on `groq/openai/gpt-oss-120b`, 30 deterministic cases and 3 simulated
 conversations. The semantic cache is disabled for eval runs — replaying a cached answer
 skips tool calls entirely, which makes tool selection unmeasurable.
 
-| Layer | Metric | Score |
-|---|---|---|
-| Deterministic | Tool-selection accuracy | **86.7%** |
-| Deterministic | Citation validity | **100%** |
-| Deterministic | Refusal accuracy | **93.3%** |
-| Deterministic | Overall pass rate | **80.0%** |
-| Deterministic | p50 / p95 latency | 1146 ms / 4378 ms |
-| Simulation | Goal completion | **100%** (3/3) |
-| Simulation | Context retention | **kept** (3/3) |
-| RAGAS | faithfulness / relevancy / precision | not run — see below |
+Two independent runs are reported rather than one, because these metrics are
+stochastic — the same query can cite on one run and not the next. A single snapshot
+presented as definitive would overstate what the harness actually measures.
+
+| Layer | Metric | Run 1 | Run 2 |
+|---|---|---|---|
+| Deterministic | Tool-selection accuracy | 86.7% | 86.7% |
+| Deterministic | Citation validity | 100% | 96.7% |
+| Deterministic | Refusal accuracy | 93.3% | 93.3% |
+| Deterministic | Overall pass rate | 80.0% | 76.7% |
+| Deterministic | p50 / p95 latency | 1146 / 4378 ms | 2008 / 4987 ms |
+| Simulation | Goal completion | 100% (3/3) | — |
+| Simulation | Context retention | kept (3/3) | — |
+| RAGAS | faithfulness / relevancy / precision | not run — see below | |
+
+The single-point difference in citation validity is one case that cited on one run and
+not the other; re-running that case in isolation passes. Tool selection and refusal
+accuracy are stable across runs, which is the signal worth trusting here.
 
 **What the remaining failures are.** Four of the 30 cases fail tool selection, and all
 four are the same disagreement: for a destination outside the four covered cities
