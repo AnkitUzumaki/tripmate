@@ -4,7 +4,7 @@ from tripmate.bootstrap import build_agent
 from tripmate.config import Settings
 
 
-def test_build_agent_registers_both_tools(tmp_path, monkeypatch):
+def test_build_agent_registers_all_tools(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "test-key")
     settings = Settings(
         llm_api_key="test-key",
@@ -17,7 +17,7 @@ def test_build_agent_registers_both_tools(tmp_path, monkeypatch):
     agent = build_agent(settings=settings)
 
     assert set(agent.registry.names()) == {
-        "search_destination_guide", "get_weather_forecast"
+        "search_destination_guide", "get_weather_forecast", "estimate_trip_budget"
     }
 
 
