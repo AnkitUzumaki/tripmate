@@ -1,3 +1,6 @@
+[![ci](https://github.com/AnkitUzumaki/tripmate/actions/workflows/ci.yml/badge.svg)](https://github.com/AnkitUzumaki/tripmate/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 # TripMate — Agentic AI Travel Assistant
 
 An LLM agent that answers travel questions about four destinations by **deciding for
@@ -653,7 +656,7 @@ changed, all three correctly chose both tools:
 | D2 | Orchestration | **LangGraph `StateGraph`** with a SQLite checkpointer | Explicit state, nodes and edges; `tools_condition` makes dynamic tool selection a graph primitive; the checkpointer owns conversation history so it cannot be forgotten. See §7.1. | LangChain `AgentExecutor` (state is implicit); CrewAI (multi-agent framing this does not need); a custom loop (replaced — see §7.1) |
 | D3 | Vector store | **ChromaDB (persistent)** behind a `VectorStore` Protocol | Metadata pre-filtering by city is *required* at scale and cannot be bolted on later without reshaping the tool signature. HNSW index — identical code path at 20 or 200k chunks | numpy cosine (no metadata filter); FAISS (no metadata/persistence ergonomics); pgvector (infra for a take-home) |
 | D4 | Embeddings | **`fastembed`** (`BAAI/bge-small-en-v1.5`, ONNX) | ~50MB, no PyTorch. Local and keyless — preserves D1's promise that Ollama alone is sufficient | `sentence-transformers` (drags in ~800MB torch); OpenAI embeddings (couples RAG to one provider, breaks D1) |
-| D5 | Weather | **Open-Meteo dual-path** + disk cache + mock fallback | Forecast APIs reach 16 days; the grading query ("packing for Tokyo in December") needs a **climate normal**. Geocoding resolves any city on earth | Forecast-only (fails Module 4); pure mock table (dies past 4 cities) |
+| D5 | Weather | **Open-Meteo dual-path** + disk cache + mock fallback | Forecast APIs reach 16 days; a query such as "packing for Tokyo in December" needs a **climate normal**. Geocoding resolves any city on earth | Forecast-only (fails Module 4); pure mock table (dies past 4 cities) |
 | D6 | Differentiators | Tier 1 + Tier 2 (eval harness, citations, semantic cache, parallel dispatch, cost accounting, multi-turn) | Depth on graded axes over breadth of features | Tier 3 padding — see §12 below |
 | D7 | API layer | **FastAPI**, thin adapter over the same `Agent` | Largest single JD bullet. ~50 lines. Mirrors the same adapter-over-one-core pattern as the CLI | Flask (JD accepts either; FastAPI is async-native and self-documenting) |
 | D8 | Container | **Multi-stage Dockerfile** | Makes the "multi-stage build" claim demonstrable | docker-compose stack, k8s manifests — padding here |
@@ -941,10 +944,14 @@ hierarchical routing: pick a tool *category* first, then a tool within it.
 
 | Excluded | Why |
 |---|---|
-| Web UI | Grading explicitly excludes UI polish |
+| Web UI | The interface here is the CLI and the trace, not a browser |
 | docker-compose / k8s manifests | One Dockerfile proves the competence; the rest is padding |
 | User auth / multi-tenancy | No user model in the problem statement |
 | LangSmith / external tracing SaaS | Local structured tracing is sufficient and dependency-free |
-| Multi-agent crew | One agent with two tools; more agents would be architecture theater |
+| Multi-agent crew | One agent with a small tool set; more agents would be architecture theater |
 | Token streaming | Adds transport complexity; the trace is what needs to be visible here |
 | Reranking | Meaningful past a few thousand chunks; noted as a scale path instead |
+
+## License
+
+MIT — see [LICENSE](LICENSE).
