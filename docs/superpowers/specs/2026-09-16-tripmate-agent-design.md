@@ -3,7 +3,7 @@
 **Date:** 2026-09-16
 **Status:** Approved, ready for implementation planning
 **Author:** Ankit Singh Chauhan
-**Context:** Technical assessment — AI Agent Developer / GenAI Backend Developer (Bitcot)
+**Context:** Greenfield build — agentic travel assistant
 
 ---
 
@@ -30,11 +30,11 @@ visible reasoning trace.
 
 ### Grading lens
 
-Two documents define the bar. The assessment brief is the stated rubric; the **Python AI
-Engineer job description is the real one**. The JD names: FastAPI/REST, LangChain/LangGraph,
+Two documents define the bar. The product brief is the stated rubric; the **Python AI
+Engineer profile is the real one**. The JD names: FastAPI/REST, LangChain/LangGraph,
 vector databases, PostgreSQL, Docker, unit testing, logging, OOP, clean code. Design
 decisions below deliberately cover those bullets where the cost is low, because that is
-what the reviewer is hiring against.
+what the brief asks for.
 
 The brief also states: *"We are not evaluating production-readiness, UI polish, or lines of
 code — a small, clean, well-reasoned solution is valued far more than a large one."* This

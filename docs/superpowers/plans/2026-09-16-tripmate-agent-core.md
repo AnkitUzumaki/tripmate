@@ -3861,7 +3861,7 @@ git commit -m "test: tool selection coverage for single, multi and no-tool queri
 
 ```python
 # tests/test_error_scenarios.py
-"""One test per error scenario named in the assessment brief.
+"""One test per error scenario named in the brief.
 
 Brief: unknown destination, missing weather data, ambiguous query, tool failure or
 timeout, out-of-scope request, malformed or empty input.

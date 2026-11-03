@@ -4,8 +4,6 @@ An LLM agent that answers travel questions about four destinations by **deciding
 itself** which tools it needs per query. No keyword routing, no fixed script: the model
 is given tool schemas and picks. Every decision it makes is visible in a structured trace.
 
-Built for the AI Agent Developer technical assessment.
-
 **▶ [Watch the demo (walkthrough + live agent runs)](https://youtu.be/XymVQe0yjCk)** — architecture, live single-tool / multi-tool / out-of-scope queries, the graceful-degradation path, code walkthrough, and the eval scorecard.
 
 ```mermaid

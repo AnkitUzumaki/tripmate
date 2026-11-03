@@ -9,8 +9,8 @@
 
 ## 1. Why this exists
 
-Round-1 feedback asked for "a framework-based agentic workflow", explicitly
-"beyond a custom implementation". The assessment brief was also edited between rounds:
+The design review asked for "a framework-based agentic workflow", explicitly
+"beyond a custom implementation". The brief was also edited between rounds:
 
 ```diff
 - LangChain, LangGraph, CrewAI, a raw OpenAI/Anthropic function-calling loop,
