@@ -19,6 +19,7 @@ from tripmate.graph.builder import bind_model, build_graph
 from tripmate.models import AgentResponse
 from tripmate.rag.chunker import load_all
 from tripmate.rag.store import ChromaStore
+from tripmate.tools import destination
 from tripmate.tools.destination import (
     reset_store, search_destination_guide, set_store,
 )
@@ -44,9 +45,23 @@ def _real_store(tmp_path_factory):
     store.add(load_all(Path("data/destinations")))
     set_store(store)
     clear_cache()
-    yield
+    yield store
     reset_store()
     clear_cache()
+
+
+@pytest.fixture(autouse=True)
+def _keep_real_store_injected(_real_store):
+    """Re-inject the shared store when an earlier module reset the global one.
+
+    Module fixtures in test_tools_destination.py and test_integration_multitool.py call
+    reset_store() on teardown. The session fixture does not run again, so without this
+    later tests fall back to build_store() and read the developer's ./.chroma, which is
+    empty on CI.
+    """
+    if destination._store is None:
+        set_store(_real_store)
+    yield
 
 
 @pytest.fixture(autouse=True)
