@@ -12,3 +12,5 @@ htmlcov/
 traces/*.jsonl
 !traces/example_*.jsonl
 .pytest_cache/
+
+.env.bak*

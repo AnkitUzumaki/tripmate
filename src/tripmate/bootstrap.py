@@ -19,6 +19,7 @@ from tripmate.rag.store import build_store
 from tripmate.tools.destination import search_destination_guide, set_store
 from tripmate.tools.registry import ToolRegistry
 from tripmate.tools.weather import get_weather_forecast
+from tripmate.tools.budget import estimate_trip_budget
 
 
 def build_chat_model(settings: Settings | None = None):
@@ -86,6 +87,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
     registry = ToolRegistry()
     registry.register(search_destination_guide)
     registry.register(get_weather_forecast)
+    registry.register(estimate_trip_budget)
 
     database = build_database(settings)
     cache = build_cache(database, settings)
